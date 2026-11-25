@@ -1,18 +1,21 @@
 #!/usr/bin/env node
-// Prepare and publish reglobal to npm.
+// Publish reglobal to npm, from main.
 //
-//   npm run release                  publish the current version if npm doesn't have it yet,
-//                                    otherwise bump the patch version first
-//   npm run release -- minor         bump minor (or: patch, major, 1.4.0) and publish
+//   npm run release                  publish the version in package.json
 //   npm run release -- --dry-run     run every check and show the package, publish nothing
 //
+// main only changes through pull requests, so the version is bumped in one
+// (`npm version minor --no-git-tag-version`, then a PR), and this script
+// publishes what was merged.
+//
 // Steps: check git is clean, on main and in sync with origin -> smoke tests ->
-// bump the version (commit + tag) -> show the package contents and confirm ->
-// npm login if needed (you type your credentials / one-time code) -> npm publish ->
-// git push with tags.
+// check npm doesn't have this version yet -> show the package contents and confirm ->
+// tag vX.Y.Z and push the tag -> npm login if needed (you type your credentials /
+// one-time code) -> npm publish.
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -20,7 +23,6 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const dryRun = args.includes('--dry-run');
-const bumpArg = args.find((a) => !a.startsWith('-'));
 
 const bold = (s) => `\x1b[1m${s}\x1b[0m`;
 const green = (s) => `\x1b[32m${s}\x1b[0m`;
@@ -94,8 +96,28 @@ check(reglobal('--version').stdout.trim() === version(), '--version prints the p
 check(reglobal('--help').stdout.includes('Usage: reglobal'), '--help prints usage');
 check(reglobal('--bogus').status === 1, 'an unknown option exits 1');
 
-// TODO: add smoke tests of the real commands (--from, --dry-run, --json) on a
-// throwaway npm prefix once they exist.
+// The real commands, on a made-up old version in a temp folder. Nothing is
+// installed: --dry-run and --list only read, and --offline keeps it off the network.
+{
+  const tmp = mkdtempSync(path.join(tmpdir(), 'reglobal-release-'));
+  try {
+    const old = path.join(tmp, 'v22.0.0', 'node_modules', 'left-pad');
+    mkdirSync(old, { recursive: true });
+    writeFileSync(path.join(old, 'package.json'), JSON.stringify({ name: 'left-pad', version: '1.3.0' }));
+    const prefix = path.join(tmp, 'prefix');
+    mkdirSync(path.join(prefix, process.platform === 'win32' ? '' : 'lib', 'node_modules'), { recursive: true });
+    const env = { ...nodeEnv, npm_config_prefix: prefix, NO_COLOR: '1' };
+    const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'reglobal.js'), ...a], { encoding: 'utf8', env });
+    const from = path.join(tmp, 'v22.0.0');
+    const list = cli(from, '--list', '--json', '--offline');
+    check(list.status === 0 && JSON.parse(list.stdout).summary.install === 1, "--list --json finds the old version's package");
+    const dry = cli(from, '--dry-run', '--offline');
+    check(dry.status === 0 && dry.stdout.includes('Would run: npm install --global left-pad@latest'), '--dry-run shows the npm command');
+    check(cli(from, '--offline').status === 1, 'with no terminal and no --yes, nothing is installed (exit 1)');
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
 
 // ---------------------------------------------------------------- 3. version
 
@@ -112,15 +134,12 @@ try {
 }
 console.log(onNpm.length ? `on npm: ${onNpm.slice(-5).join(', ')}` : `${name} is not on npm yet`);
 
-const bump = bumpArg ?? (onNpm.includes(version()) ? 'patch' : null);
-if (bump && !dryRun) {
-  // Commits package.json and tags vX.Y.Z.
-  run('npm', ['version', bump, '-m', 'Release %s']);
-} else if (bump) {
-  console.log(`would run: npm version ${bump}`);
-}
 const v = version();
-if (!dryRun && onNpm.includes(v)) die(`${v} is already on npm: pass patch, minor, major or a new version`);
+if (onNpm.includes(v)) {
+  const msg = `${v} is already on npm: bump the version in a pull request first (npm version patch|minor|major --no-git-tag-version)`;
+  if (dryRun) console.log(`\x1b[33m! ${msg} (a real release stops here)\x1b[0m`);
+  else die(msg);
+}
 console.log(`publishing ${bold(`${name}@${v}`)}`);
 
 // ---------------------------------------------------------------- 4. contents
@@ -135,8 +154,22 @@ if (dryRun) {
 
 const answer = await ask(`\nPublish ${bold(`${name}@${v}`)} to npm? [y/N] `);
 if (!/^y(es)?$/i.test(answer)) {
-  console.log(`Not published. To undo the version bump: git tag -d v${v} && git reset --hard HEAD~1`);
+  console.log('Not published. Nothing was changed.');
   process.exit(3);
+}
+
+// ---------------------------------------------------------------- tag
+
+step(`Tag v${v}`);
+// The tag may already be there, made with the GitHub release. It must point at
+// this commit: publishing anything else under that version would be a lie.
+const tagged = git('tag', '--list', `v${v}`);
+if (tagged) {
+  if (git('rev-list', '-n', '1', `v${v}`) !== git('rev-parse', 'HEAD')) die(`tag v${v} exists but is not on this commit`);
+  console.log(`v${v} is already tagged on this commit`);
+} else {
+  run('git', ['tag', '-a', `v${v}`, '-m', `reglobal ${v}`]);
+  run('git', ['push', 'origin', `v${v}`]);
 }
 
 // ---------------------------------------------------------------- 5. login + publish
@@ -152,11 +185,6 @@ else {
 step('Publishing');
 // npm asks for a one-time password here if your account has 2FA on.
 run('npm', ['publish']);
-
-// ---------------------------------------------------------------- 6. push
-
-step('Pushing to GitHub');
-run('git', ['push', '--follow-tags', 'origin', 'main']);
 
 console.log(`\n${green(`✓ Published ${name}@${v}`)}  https://www.npmjs.com/package/${name}`);
 console.log(`  Install: npm install -g ${name}`);

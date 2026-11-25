@@ -1,6 +1,6 @@
 {
   "name": "reglobal",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Move your global npm packages to a new Node version: reinstall everything from the old version in one command, at the latest versions. Works with fnm, nvm, nvm-windows, mise, asdf and n. No dependencies.",
   "keywords": [
     "npm",

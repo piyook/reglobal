@@ -1,6 +1,6 @@
 # reglobal
 
-> Work in progress: not on npm yet. The badges below start working after the first release.
+> Not on npm yet: the npm badge starts working with the first npm release.
 
 [![GitHub Release](https://img.shields.io/github/v/release/piyook/reglobal)](https://github.com/piyook/reglobal/releases)
 [![checks workflow](https://github.com/piyook/reglobal/actions/workflows/checks.yaml/badge.svg)](https://github.com/piyook/reglobal/actions/workflows/checks.yaml)
