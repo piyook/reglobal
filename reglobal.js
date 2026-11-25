@@ -4,26 +4,32 @@
 // node_modules folder directly, so the old npm (or Node) never has to run.
 // No dependencies on purpose: it must work in a fresh Node with no globals.
 //
-// Built so far: finding the installed Node versions and their globals, and
-// --list. Installing (--dry-run, --yes), export and import are still to write.
+// Still to write: export and import.
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { parseArgs } from 'node:util';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
 const SCHEMA_VERSION = 1;
 
-const HELP = `Usage: reglobal --list [--from <version|path>] [--json]
+const HELP = `Usage: reglobal [--from <version|path>] [--dry-run | --yes] [--keep-versions] [--json]
+       reglobal --list [--from <version|path>] [--json]
 
-Reinstall the global npm packages from another Node version into this one.
+Reinstall the global npm packages from another Node version into this one,
+the Node that runs reglobal. Asks before installing.
 
 Options:
   --from <v|path>  the old Node version: 24, 24.1 or 24.1.0 picks the newest
                    installed match; a path is that version's install folder
                    or its global node_modules. Default: the newest installed
                    version other than this one.
+  --dry-run        show what would be installed, install nothing
+  --yes            install without asking (needed with --json or no terminal)
+  --keep-versions  install the same versions as before, not the latest
   --list           show the old version's globals next to this one's (read-only)
   --json           print JSON on stdout
   -h, --help       show this help
@@ -31,7 +37,9 @@ Options:
 
 Finds versions installed by fnm, nvm, nvm-windows, mise, asdf and n.
 
-Not built yet: installing (--dry-run, --yes, --keep-versions), export, import.`;
+Exit codes: 0 done, 1 error, 2 nothing to install, 3 cancelled.
+
+Not built yet: export, import.`;
 
 // Packages that come with Node itself: never reinstall them.
 const BUNDLED = new Set(['npm', 'corepack']);
@@ -241,7 +249,9 @@ function readGlobals(dir) {
 function statusOf(pkg, here) {
   if (pkg.status) return pkg.status;
   if (BUNDLED.has(pkg.name)) return 'skipped';
-  return here ? 'present' : 'install';
+  if (here) return 'present';
+  // A file: path was relative to the old folder, so it can't be installed again from here.
+  return pkg.source === 'file' ? 'manual' : 'install';
 }
 
 function compare(oldPkgs, currentPkgs) {
@@ -255,7 +265,7 @@ function compare(oldPkgs, currentPkgs) {
 }
 
 function summarize(packages) {
-  const summary = { install: 0, present: 0, skipped: 0, linked: 0, broken: 0 };
+  const summary = { install: 0, present: 0, skipped: 0, linked: 0, manual: 0, broken: 0 };
   for (const p of packages) summary[p.status]++;
   return summary;
 }
@@ -265,19 +275,20 @@ function warningsFor(packages) {
   for (const p of packages) {
     if (p.status === 'linked') warnings.push(`${p.name} is an npm link to ${p.link}: not reinstalled. Run npm link again in that folder.`);
     if (p.status === 'broken') warnings.push(`${p.name} has no readable package.json: not reinstalled.`);
-    if (p.status === 'install' && p.source !== 'registry') warnings.push(`${p.name} was installed from ${p.source} (${p.resolved}), not the registry.`);
+    if (p.status === 'manual') warnings.push(`${p.name} was installed from a file (${p.resolved}): not reinstalled. Install it again by hand.`);
+    if (p.status === 'install' && p.source !== 'registry') warnings.push(`${p.name} is reinstalled from ${p.source} (${p.resolved}), not the registry.`);
   }
   return warnings;
 }
 
-const LABELS = { install: 'to install', present: 'installed', skipped: 'skipped', linked: 'linked', broken: 'broken' };
+const LABELS = { install: 'to install', present: 'installed', skipped: 'skipped', linked: 'linked', manual: 'manual', broken: 'broken' };
 
 function describe(p) {
   const v = p.version ? ` ${p.version}` : '';
   if (p.status === 'present') return `${p.name}${v} (here: ${p.currentVersion})`;
   if (p.status === 'skipped') return `${p.name}${v} (comes with Node)`;
   if (p.status === 'linked') return `${p.name} -> ${p.link} (npm link)`;
-  if (p.status === 'install' && p.source !== 'registry') return `${p.name}${v} (from ${p.source}: ${p.resolved})`;
+  if (p.source && p.source !== 'registry') return `${p.name}${v} (from ${p.source}: ${p.resolved})`;
   return `${p.name}${v}`;
 }
 
@@ -288,7 +299,7 @@ function printList(r) {
   if (!r.packages.length) console.log('  no global packages');
   for (const p of r.packages) console.log(`  ${LABELS[p.status].padEnd(11)} ${describe(p)}`);
   const s = r.summary;
-  console.log(`\n${s.install} to install, ${s.present} already here, ${s.skipped + s.linked + s.broken} skipped.`);
+  console.log(`\n${s.install} to install, ${s.present} already here, ${s.skipped + s.linked + s.manual + s.broken} skipped.`);
   for (const w of r.warnings) console.error(`WARNING: ${w}`);
 }
 
@@ -307,11 +318,106 @@ function list(opts, env = process.env) {
   };
 }
 
+// ---------------------------------------------------------------- install
+
+// What to give npm for one package: the registry name at the latest (or the
+// same) version, or the git URL / tarball URL it came from. A git URL loses its
+// #commit unless --keep-versions, so it gets the branch's latest.
+function specFor(p, keep) {
+  if (p.source === 'git') return keep ? p.resolved : p.resolved.replace(/#.*$/, '');
+  if (p.source === 'url') return p.resolved;
+  return `${p.name}@${keep && p.version ? p.version : 'latest'}`;
+}
+
+function npmCliIn(binDir) {
+  const lib = process.platform === 'win32' ? '' : path.join('..', 'lib');
+  return path.join(binDir, lib, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+}
+
+// The npm of the Node running now: the one that came with it, or the first on
+// PATH. It is run as `node npm-cli.js`, never through a shell, so nothing in a
+// package name or URL is read by cmd.exe or sh. REGLOBAL_NPM_CLI overrides it.
+function findNpmCli(env) {
+  if (env.REGLOBAL_NPM_CLI) {
+    if (!existsSync(env.REGLOBAL_NPM_CLI)) throw new UsageError('NO_NPM', `REGLOBAL_NPM_CLI is set to ${env.REGLOBAL_NPM_CLI}, which does not exist`);
+    return env.REGLOBAL_NPM_CLI;
+  }
+  const pathDirs = (env.PATH || env.Path || '').split(path.delimiter).filter(Boolean);
+  const cli = firstExisting([path.dirname(process.execPath), ...pathDirs].map(npmCliIn));
+  if (!cli) throw new UsageError('NO_NPM', 'npm was not found next to this Node or on PATH');
+  return cli;
+}
+
+function runNpm(cli, specs, env) {
+  // npm's own output goes to stderr, so stdout stays clean for --json.
+  const r = spawnSync(process.execPath, [cli, 'install', '--global', '--', ...specs], { stdio: ['ignore', 2, 2], env });
+  if (r.error) throw r.error;
+  return r.status ?? 1;
+}
+
+async function confirm(question) {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    return /^y(es)?$/i.test((await rl.question(question)).trim());
+  } finally {
+    rl.close();
+  }
+}
+
+function printPlan(r) {
+  printList(r);
+  if (!r.plan.length) console.log('\nNothing to install.');
+  else console.log(`\n${r.dryRun ? 'Would run' : 'Runs'}: npm install --global ${r.plan.map((p) => p.spec).join(' ')}`);
+}
+
+// 0 installed, 1 failed, 2 nothing to install, 3 cancelled.
+async function install(opts, json, env = process.env) {
+  const r = { ...list(opts, env), command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) };
+  r.plan = r.packages
+    .filter((p) => p.status === 'install')
+    .map((p) => ({ name: p.name, version: p.version, source: p.source, spec: specFor(p, r.keepVersions) }));
+  const report = (code) => {
+    if (json) console.log(JSON.stringify(r, null, 2));
+    return code;
+  };
+  if (!json) printPlan(r);
+  if (!r.plan.length) return report(2);
+  if (r.dryRun) return report(0);
+  if (!opts.yes) {
+    if (json || !process.stdin.isTTY) throw new UsageError('NEEDS_YES', 'nothing installed: pass --yes to install without asking, or --dry-run to preview');
+    if (!(await confirm(`Install ${r.plan.length} package(s) into Node ${r.to.version}? [y/N] `))) {
+      console.log('Cancelled: nothing installed.');
+      return 3;
+    }
+  }
+  r.npmExitCode = runNpm(
+    findNpmCli(env),
+    r.plan.map((p) => p.spec),
+    env,
+  );
+  const after = new Set(readGlobals(r.to.dir).map((p) => p.name));
+  r.installed = r.plan.filter((p) => after.has(p.name)).map((p) => p.name);
+  r.failed = r.plan.filter((p) => !after.has(p.name)).map((p) => p.name);
+  if (r.npmExitCode === 0 && !r.failed.length) {
+    if (!json) console.log(`Installed ${r.installed.length} package(s) into Node ${r.to.version}.`);
+    return report(0);
+  }
+  const message = `npm exited with ${r.npmExitCode}; not installed: ${r.failed.join(', ') || 'none'}`;
+  r.error = { code: 'INSTALL_FAILED', message };
+  if (!json) console.error(`reglobal: ${message}`);
+  return report(1);
+}
+
 // ---------------------------------------------------------------- cli
+
+const INSTALL_ONLY = ['dry-run', 'yes', 'keep-versions'];
 
 const OPTIONS = {
   from: { type: 'string' },
   list: { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
+  yes: { type: 'boolean', short: 'y' },
+  'keep-versions': { type: 'boolean' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
@@ -335,27 +441,29 @@ function fail(err, json) {
   return 1;
 }
 
-export function main(argv) {
+export async function main(argv) {
   const args = argv.slice(2);
   const json = args.includes('--json');
   try {
     const opts = parse(args);
-    if (opts.version && !opts.help) {
+    if (opts.help) {
+      console.log(HELP);
+      return 0;
+    }
+    if (opts.version) {
       console.log(VERSION);
       return 0;
     }
-    if (opts.list) {
-      const result = list(opts);
-      if (json) console.log(JSON.stringify(result, null, 2));
-      else printList(result);
-      return 0;
-    }
-    if (!opts.help && (opts.from || json)) throw new UsageError('NOT_BUILT', 'installing is not built yet: use --list to see what would be installed');
-    console.log(HELP);
+    if (!opts.list) return await install(opts, json);
+    const extra = INSTALL_ONLY.find((o) => opts[o]);
+    if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --list, which installs nothing`);
+    const result = list(opts);
+    if (json) console.log(JSON.stringify(result, null, 2));
+    else printList(result);
     return 0;
   } catch (err) {
     return fail(err, json);
   }
 }
 
-process.exitCode = main(process.argv);
+process.exitCode = await main(process.argv);

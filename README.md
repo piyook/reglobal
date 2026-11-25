@@ -52,6 +52,19 @@ To   Node 26.1.0: ~/.local/share/fnm/node-versions/v26.1.0/installation/lib/node
 
 It only reads folders: the old Node and npm never run, so it works even when they're broken. Add `--json` for output a script or agent can read (see [llms.txt](llms.txt)).
 
+## Reinstall them
+
+```sh
+reglobal                   # shows the list, asks, then runs one npm install --global
+reglobal --dry-run         # show what it would run, install nothing
+reglobal --yes             # don't ask (scripts and agents)
+reglobal --keep-versions   # the same versions as before, not the latest
+```
+
+npm and corepack are left alone, since they come with Node. Packages from git come back from git. `npm link` folders and packages installed from a local file are listed, not reinstalled.
+
+Exit codes: `0` done, `1` error, `2` nothing to install, `3` cancelled.
+
 ## License
 
 MIT
