@@ -6,11 +6,12 @@
 // HOME and the managers' variables at it, so the real machine is never read.
 
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, describe, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const REGLOBAL = fileURLToPath(new URL('../reglobal.js', import.meta.url));
@@ -27,9 +28,50 @@ for (const [k, v] of Object.entries(process.env)) {
 baseEnv.NO_COLOR = '1';
 
 const temps = [];
+
+// A fake npm registry in its own process (spawnSync blocks this one, so a
+// server here could never answer). It knows a few packages' latest versions,
+// answers 404 for the rest, and logs every name it is asked for.
+const REGISTRY = {
+  typescript: '5.9.3',
+  '@scope/tool': '3.0.0',
+  cowsay: '1.8.0',
+  'zero-dot': '0.7.0',
+};
+const REGISTRY_SERVER = `
+import { appendFileSync } from 'node:fs';
+import http from 'node:http';
+const versions = JSON.parse(process.env.FAKE_REGISTRY);
+http.createServer((req, res) => {
+  const name = decodeURIComponent(req.url).replace(/^\\//, '').replace(/\\/latest$/, '');
+  appendFileSync(process.env.FAKE_REGISTRY_LOG, name + '\\n');
+  if (!versions[name]) { res.writeHead(404).end('{}'); return; }
+  res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ name, version: versions[name] }));
+}).listen(0, '127.0.0.1', function () { console.log(this.address().port); });
+`;
+let registry;
+let registryLog;
+
+before(async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'reglobal-registry-'));
+  temps.push(dir);
+  writeFileSync(path.join(dir, 'server.mjs'), REGISTRY_SERVER);
+  registryLog = path.join(dir, 'requests.log');
+  writeFileSync(registryLog, '');
+  registry = spawn(process.execPath, [path.join(dir, 'server.mjs')], {
+    env: { ...baseEnv, FAKE_REGISTRY: JSON.stringify(REGISTRY), FAKE_REGISTRY_LOG: registryLog },
+    stdio: ['ignore', 'pipe', 'inherit'],
+  });
+  const [port] = await once(registry.stdout, 'data');
+  baseEnv.npm_config_registry = `http://127.0.0.1:${String(port).trim()}/`;
+});
+
 after(() => {
+  registry?.kill();
   for (const t of temps) rmSync(t, { recursive: true, force: true });
 });
+
+const registryAsked = () => readFileSync(registryLog, 'utf8').split('\n').filter(Boolean);
 
 // A fresh fake machine: an empty home, and an npm prefix for "this" Node.
 function machine() {
@@ -59,8 +101,9 @@ function fnmVersion(m, v) {
   return dir;
 }
 
-function reglobal(args, env = baseEnv) {
-  const r = spawnSync(process.execPath, [REGLOBAL, ...args], { encoding: 'utf8', env });
+// `input` is typed into reglobal's stdin (with REGLOBAL_ASSUME_TTY to answer prompts).
+function reglobal(args, env = baseEnv, input = '') {
+  const r = spawnSync(process.execPath, [REGLOBAL, ...args], { encoding: 'utf8', env, input });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
@@ -303,7 +346,7 @@ describe('--list', () => {
     assert.equal(p.cowsay.currentVersion, '1.7.0');
     assert.equal(p.npm.status, 'skipped');
     assert.equal(p.corepack.status, 'skipped');
-    assert.deepEqual(r.summary, { install: 2, present: 1, skipped: 2, linked: 0, manual: 0, broken: 0 });
+    assert.deepEqual(r.summary, { install: 2, excluded: 0, present: 1, skipped: 2, linked: 0, manual: 0, broken: 0 });
     assert.deepEqual(r.warnings, []);
   });
 
@@ -550,5 +593,232 @@ describe('install', () => {
     const out = listJsonInstall(m, ['--yes']);
     assert.equal(out.code, 1);
     assert.equal(out.json.error.code, 'NO_NPM');
+  });
+});
+
+describe('latest versions', () => {
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'typescript', '5.4.0');
+    pkg(old, '@scope/tool', '2.0.0');
+    pkg(old, 'zero-dot', '0.5.0');
+    pkg(old, 'not-on-registry', '1.0.0');
+    return { m, old };
+  }
+
+  test('--list shows what @latest is, and flags major updates', () => {
+    const { m } = setup();
+    const p = byName(listJson(m));
+    assert.equal(p.typescript.latest, '5.9.3');
+    assert.equal(p.typescript.majorUpdate, false);
+    assert.equal(p['@scope/tool'].latest, '3.0.0');
+    assert.equal(p['@scope/tool'].majorUpdate, true);
+    assert.equal(p['zero-dot'].majorUpdate, true, '0.5 -> 0.7 can break too');
+    assert.equal(p['not-on-registry'].latest, null);
+    const text = reglobal(['--list'], m.env);
+    assert.match(text.stdout, /to install {2}typescript 5\.4\.0 -> 5\.9\.3\n/);
+    assert.match(text.stdout, /@scope\/tool 2\.0\.0 -> 3\.0\.0 \(major\)/);
+    assert.match(text.stdout, /to install {2}not-on-registry 1\.0\.0\n/);
+  });
+
+  test('the plan carries latest and majorUpdate', () => {
+    const { m } = setup();
+    const plan = listJsonInstall(m, ['--dry-run']).json.plan;
+    assert.deepEqual(plan[0], { name: '@scope/tool', version: '2.0.0', source: 'registry', spec: '@scope/tool@latest', latest: '3.0.0', majorUpdate: true });
+  });
+
+  test('--offline and --keep-versions do not ask the registry', () => {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'offline-probe', '1.0.0');
+    const r = listJson(m, '--offline');
+    assert.equal('latest' in r.packages[0], false);
+    listJsonInstall(m, ['--dry-run', '--keep-versions']);
+    assert.equal(registryAsked().includes('offline-probe'), false);
+    listJson(m);
+    assert.equal(registryAsked().includes('offline-probe'), true);
+  });
+
+  test('a registry that cannot be reached is a warning, not an error', () => {
+    const { m } = setup();
+    m.env.npm_config_registry = 'http://127.0.0.1:9/';
+    const r = listJson(m);
+    assert.equal(r.packages[0].latest, null);
+    assert.match(r.warnings.at(-1), /could not get the latest versions from http:\/\/127\.0\.0\.1:9\/: pass --offline/);
+  });
+});
+
+describe('choosing packages', () => {
+  // typescript, @scope/tool and pnpm to install; cowsay already here.
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'typescript', '5.4.0');
+    pkg(old, '@scope/tool', '2.0.0');
+    pkg(old, 'pnpm', '9.0.0');
+    pkg(old, 'cowsay', '1.6.0');
+    pkg(m.current, 'cowsay', '1.7.0');
+    const calls = withFakeNpm(m);
+    return { m, calls, specs: () => calls().at(-1)?.slice(3) };
+  }
+
+  test('--skip leaves packages out, comma separated or repeated', () => {
+    const { m, specs } = setup();
+    const r = reglobal(['--yes', '--skip', 'typescript,pnpm'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(specs(), ['@scope/tool@latest']);
+    assert.match(r.stdout, /left out {4}typescript 5\.4\.0 -> 5\.9\.3/);
+    assert.match(r.stdout, /1 to install, 2 left out, 1 already here/);
+    const { m: m2, specs: specs2 } = setup();
+    assert.equal(reglobal(['--yes', '--skip', 'typescript', '--skip', 'pnpm'], m2.env).code, 0);
+    assert.deepEqual(specs2(), ['@scope/tool@latest']);
+  });
+
+  test('--only installs just those', () => {
+    const { m, specs } = setup();
+    const out = listJsonInstall(m, ['--yes', '--only', 'pnpm']);
+    assert.equal(out.code, 0, out.stderr);
+    assert.deepEqual(specs(), ['pnpm@latest']);
+    assert.deepEqual(out.json.installed, ['pnpm']);
+    assert.equal(byName(out.json).typescript.status, 'excluded');
+    assert.equal(out.json.summary.excluded, 2);
+  });
+
+  test('a name that is not to be installed exits 1 and installs nothing', () => {
+    const { m, calls } = setup();
+    const typo = listJsonInstall(m, ['--yes', '--skip', 'typscript']);
+    assert.equal(typo.code, 1);
+    assert.equal(typo.json.error.code, 'BAD_NAME');
+    assert.match(typo.json.error.message, /typscript is not one of the packages to install: Node 24\.3\.0 has no global package by that name/);
+    const present = reglobal(['--yes', '--only', 'cowsay'], m.env);
+    assert.match(present.stderr, /cowsay is not one of the packages to install: its status is present/);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('--skip and --only do not go together', () => {
+    const { m } = setup();
+    const r = reglobal(['--yes', '--skip', 'pnpm', '--only', 'typescript'], m.env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /--skip and --only do not go together/);
+  });
+
+  test('skipping everything leaves nothing to install: exit 2', () => {
+    const { m, calls } = setup();
+    assert.equal(reglobal(['--yes', '--skip', 'typescript,pnpm,@scope/tool'], m.env).code, 2);
+    assert.deepEqual(calls(), []);
+  });
+});
+
+describe('the question', () => {
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'typescript', '5.4.0');
+    pkg(old, 'pnpm', '9.0.0');
+    const calls = withFakeNpm(m);
+    m.env.REGLOBAL_ASSUME_TTY = '1';
+    return { m, calls };
+  }
+
+  test('y installs', () => {
+    const { m, calls } = setup();
+    const r = reglobal([], m.env, 'y\n');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /Install 2 package\(s\) into Node .+\? \[y\/N, e to leave some out\]/);
+    assert.deepEqual(calls()[0].slice(3), ['pnpm@latest', 'typescript@latest']);
+  });
+
+  test('anything else, or no answer, cancels with exit 3', () => {
+    const { m, calls } = setup();
+    assert.equal(reglobal([], m.env, 'n\n').code, 3);
+    const r = reglobal([], m.env, '');
+    assert.equal(r.code, 3);
+    assert.match(r.stdout, /Cancelled: nothing installed\./);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('e asks which to leave out, then asks again', () => {
+    const { m, calls } = setup();
+    const r = reglobal([], m.env, 'e\ntypo\ne\npnpm\ny\n');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /typo is not one of the packages to install/);
+    assert.match(r.stdout, /Runs: npm install --global typescript@latest\n/);
+    assert.deepEqual(calls()[0].slice(3), ['typescript@latest']);
+  });
+
+  test('leaving everything out cancels', () => {
+    const { m, calls } = setup();
+    assert.equal(reglobal([], m.env, 'e\npnpm typescript\n').code, 3);
+    assert.deepEqual(calls(), []);
+  });
+});
+
+describe('--interactive', () => {
+  const DOWN = '\x1b[B';
+  const UP = '\x1b[A';
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, '@scope/tool', '2.0.0');
+    pkg(old, 'pnpm', '9.0.0');
+    pkg(old, 'typescript', '5.4.0');
+    const calls = withFakeNpm(m);
+    m.env.REGLOBAL_ASSUME_TTY = '1';
+    return { m, calls, specs: () => calls().at(-1)?.slice(3) };
+  }
+
+  test('everything starts ticked: enter installs it all', () => {
+    const { m, specs } = setup();
+    const r = reglobal(['-i'], m.env, '\r');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /> \[x\] @scope\/tool 2\.0\.0 -> 3\.0\.0 \(major\)/);
+    assert.deepEqual(specs(), ['@scope/tool@latest', 'pnpm@latest', 'typescript@latest']);
+  });
+
+  test('space unticks the package under the cursor', () => {
+    const { m, specs } = setup();
+    const r = reglobal(['--interactive'], m.env, `${DOWN} ${DOWN}${DOWN}${UP} \r`);
+    assert.equal(r.code, 0, r.stderr);
+    // down, untick pnpm, down, down (wraps to the top), up, untick typescript
+    assert.deepEqual(specs(), ['@scope/tool@latest']);
+    assert.match(r.stdout, /Runs: npm install --global @scope\/tool@latest\n/);
+  });
+
+  test('a ticks none or all, j and k move', () => {
+    const { m, specs } = setup();
+    assert.equal(reglobal(['-i'], m.env, 'aj \r').code, 0);
+    assert.deepEqual(specs(), ['pnpm@latest']);
+    const { m: m2, specs: specs2 } = setup();
+    assert.equal(reglobal(['-i'], m2.env, 'aak \r').code, 0);
+    assert.deepEqual(specs2(), ['@scope/tool@latest', 'pnpm@latest']);
+  });
+
+  test('q, or nothing ticked, cancels with exit 3', () => {
+    const { m, calls } = setup();
+    assert.equal(reglobal(['-i'], m.env, 'q').code, 3);
+    const none = reglobal(['-i'], m.env, 'a\r');
+    assert.equal(none.code, 3);
+    assert.match(none.stdout, /Nothing ticked: nothing installed\./);
+    assert.equal(reglobal(['-i'], m.env, '').code, 3, 'stdin closed before enter');
+    assert.deepEqual(calls(), []);
+  });
+
+  test('with --dry-run it shows the command for what was ticked', () => {
+    const { m, calls } = setup();
+    const r = reglobal(['-i', '--dry-run'], m.env, ' \r');
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /Would run: npm install --global pnpm@latest typescript@latest/);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('needs a terminal, and does not go with --json or --yes', () => {
+    const { m } = setup();
+    assert.match(reglobal(['-i', '--json'], m.env).stdout, /"code": "BAD_OPTION"/);
+    assert.match(reglobal(['-i', '--yes'], m.env).stderr, /--interactive does not go with --yes/);
+    delete m.env.REGLOBAL_ASSUME_TTY;
+    const r = reglobal(['-i'], m.env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /--interactive needs a terminal: use --skip or --only/);
   });
 });

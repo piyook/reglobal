@@ -59,7 +59,18 @@ reglobal                   # shows the list, asks, then runs one npm install --g
 reglobal --dry-run         # show what it would run, install nothing
 reglobal --yes             # don't ask (scripts and agents)
 reglobal --keep-versions   # the same versions as before, not the latest
+reglobal -i                # tick and untick packages in a checklist first
+reglobal --skip eslint     # leave some out (or --only typescript,pnpm)
 ```
+
+The list shows the version each package will move to, and flags a new major version:
+
+```text
+  to install  typescript 5.4.0 -> 5.9.3
+  to install  eslint 8.57.0 -> 9.39.1 (major)
+```
+
+At the question, answer `e` to type the names of the ones to leave out. `--offline` skips the version lookup.
 
 npm and corepack are left alone, since they come with Node. Packages from git come back from git. `npm link` folders and packages installed from a local file are listed, not reinstalled.
 
