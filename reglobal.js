@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
-import { parseArgs } from 'node:util';
+import { parseArgs, stripVTControlCharacters } from 'node:util';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
 const SCHEMA_VERSION = 1;
@@ -299,31 +299,83 @@ const LABELS = {
   broken: 'broken',
 };
 
-// "typescript 5.4.0 -> 5.9.3 (major)": the old version, and the one @latest gets.
-function versionLabel(p) {
-  const v = p.version ? ` ${p.version}` : '';
-  const arrow = p.latest && p.latest !== p.version ? ` -> ${p.latest}${p.majorUpdate ? ' (major)' : ''}` : '';
-  return `${p.name}${v}${arrow}`;
+// ---------------------------------------------------------------- styling
+
+// Colour and Unicode symbols only on a terminal. NO_COLOR turns them off and
+// FORCE_COLOR on. Pipes, logs and agents get plain ASCII.
+function makeStyle(stream, env = process.env) {
+  const on = !env.NO_COLOR && (env.FORCE_COLOR ? env.FORCE_COLOR !== '0' : Boolean(stream.isTTY) && env.TERM !== 'dumb');
+  const sgr = (open, close) => (text) => (on ? `\x1b[${open}m${text}\x1b[${close}m` : String(text));
+  return {
+    bold: sgr(1, 22),
+    dim: sgr(2, 22),
+    red: sgr(31, 39),
+    green: sgr(32, 39),
+    yellow: sgr(33, 39),
+    cyan: sgr(36, 39),
+    arrow: on ? '→' : '->',
+    pointer: on ? '❯' : '>',
+    ticked: on ? '◉' : '[x]',
+    unticked: on ? '◯' : '[ ]',
+    ok: on ? '✔ ' : '',
+    ask: on ? '? ' : '',
+    sep: on ? ' · ' : ', ',
+  };
 }
 
-function describe(p) {
-  if (p.status === 'present') return `${versionLabel(p)} (here: ${p.currentVersion})`;
-  if (p.status === 'skipped') return `${versionLabel(p)} (comes with Node)`;
-  if (p.status === 'linked') return `${p.name} -> ${p.link} (npm link)`;
-  if (p.source && p.source !== 'registry') return `${versionLabel(p)} (from ${p.source}: ${p.resolved})`;
-  return versionLabel(p);
+const OUT = makeStyle(process.stdout);
+const ERR = makeStyle(process.stderr);
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const STATUS_COLOR = { install: 'green', excluded: 'dim', present: 'dim', skipped: 'dim', linked: 'yellow', manual: 'yellow', broken: 'red' };
+
+// "5.4.0 -> 5.9.3 (major)": the old version, and the one @latest gets.
+function versionPart(p, s) {
+  const v = p.version ?? '';
+  if (!p.latest || p.latest === p.version) return v;
+  return `${s.dim(v)} ${s.arrow} ${s.green(p.latest)}${p.majorUpdate ? ` ${s.yellow('(major)')}` : ''}`;
+}
+
+function noteFor(p) {
+  if (p.status === 'present') return `(here: ${p.currentVersion})`;
+  if (p.status === 'skipped') return '(comes with Node)';
+  if (p.status === 'linked') return `(npm link to ${p.link})`;
+  if (p.status === 'broken') return '(no package.json)';
+  if (p.source && p.source !== 'registry') return `(from ${p.source}: ${p.resolved})`;
+  return '';
+}
+
+const nameWidth = (pkgs) => Math.min(40, Math.max(0, ...pkgs.map((p) => p.name.length)));
+
+// Pad styled text by what shows on screen, not counting the colour codes.
+const visible = (text) => stripVTControlCharacters(text).length;
+const padStyled = (text, width) => text + ' '.repeat(Math.max(0, width - visible(text)));
+
+function row(p, widths, s) {
+  const label = s[STATUS_COLOR[p.status]](LABELS[p.status].padEnd(10));
+  const name = p.status === 'install' ? s.bold(p.name.padEnd(widths.name)) : p.name.padEnd(widths.name);
+  const note = noteFor(p);
+  const version = versionPart(p, s);
+  return `  ${label}  ${name}  ${note ? `${padStyled(version, widths.version)}  ${s.dim(note)}` : version}`.trimEnd();
 }
 
 function printList(r) {
+  const s = OUT;
   const from = `Node ${r.from.version ?? '?'}${r.from.manager ? ` (${r.from.manager})` : ''}`;
-  console.log(`From ${from}: ${r.from.dir}`);
-  console.log(`To   Node ${r.to.version}: ${r.to.dir}\n`);
-  if (!r.packages.length) console.log('  no global packages');
-  for (const p of r.packages) console.log(`  ${LABELS[p.status].padEnd(11)} ${describe(p)}`);
-  const s = r.summary;
-  const leftOut = s.excluded ? `${s.excluded} left out, ` : '';
-  console.log(`\n${s.install} to install, ${leftOut}${s.present} already here, ${s.skipped + s.linked + s.manual + s.broken} skipped.`);
-  for (const w of r.warnings) console.error(`WARNING: ${w}`);
+  const to = `Node ${r.to.version}`;
+  const w = Math.max(from.length, to.length);
+  console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.dir)}`);
+  console.log(`${s.bold('To')}   ${to.padEnd(w)}  ${s.dim(r.to.dir)}\n`);
+  if (!r.packages.length) console.log(s.dim('  no global packages'));
+  const widths = { name: nameWidth(r.packages), version: Math.max(0, ...r.packages.map((p) => visible(versionPart(p, s)))) };
+  for (const p of r.packages) console.log(row(p, widths, s));
+  const c = r.summary;
+  const parts = [s.green(`${c.install} to install`)];
+  if (c.excluded) parts.push(`${c.excluded} left out`);
+  parts.push(`${c.present} already here`, `${c.skipped + c.linked + c.manual + c.broken} skipped`);
+  console.log(`\n${parts.join(s.sep)}`);
+  for (const w of r.warnings) console.error(`${ERR.yellow('WARNING:')} ${w}`);
 }
 
 // ---------------------------------------------------------------- latest versions
@@ -489,14 +541,16 @@ async function confirm(r) {
   const p = prompter();
   try {
     for (;;) {
-      const answer = (await p.ask(`Install ${r.plan.length} package(s) into Node ${r.to.version}? [y/N, e to leave some out] `)) ?? '';
+      const s = ERR;
+      const question = `Install ${plural(r.plan.length, 'package')} into Node ${r.to.version}?`;
+      const answer = (await p.ask(`\n${s.cyan(s.ask)}${s.bold(question)} ${s.dim('[y/N, e to leave some out]')} `)) ?? '';
       if (/^y(es)?$/i.test(answer)) return true;
       if (!/^e(dit)?$/i.test(answer)) return false;
-      const names = splitNames([(await p.ask('Names to leave out (space or comma separated): ')) ?? '']);
+      const names = splitNames([(await p.ask(`${s.cyan(s.ask)}${s.bold('Names to leave out')} ${s.dim('(space or comma separated)')} `)) ?? '']);
       try {
         leaveOut(r, names);
       } catch (err) {
-        console.error(`reglobal: ${err.message}`);
+        console.error(`${s.red('reglobal:')} ${err.message}`);
         continue;
       }
       if (!r.plan.length) return false;
@@ -511,17 +565,30 @@ async function confirm(r) {
 // Returns the names left ticked, or null when cancelled.
 function checklist(items) {
   const { stdin, stderr: out } = process;
+  const s = ERR;
   const on = items.map(() => true);
+  const width = nameWidth(items);
+  const keyHelp =
+    s.arrow === '->' ? 'up/down move, space tick, a all or none, enter go on, q cancel' : '↑/↓ move · space tick · a all/none · enter go on · q cancel';
   let cursor = 0;
   let drawn = 0;
+  const line = (p, i) => {
+    const here = i === cursor;
+    const box = on[i] ? s.green(s.ticked) : s.dim(s.unticked);
+    const name = p.name.padEnd(width);
+    return `${here ? s.cyan(s.pointer) : ' '} ${box} ${here ? s.bold(s.cyan(name)) : on[i] ? name : s.dim(name)}  ${versionPart(p, s)}`;
+  };
   const draw = () => {
     if (drawn) out.write(`\x1b[${drawn}A\x1b[0J`);
+    const ticked = on.filter(Boolean).length;
     const lines = [
-      'Choose what to install: up/down to move, space to tick or untick, a for all or none, enter to go on, q to cancel.',
-      ...items.map((p, i) => `${i === cursor ? '>' : ' '} [${on[i] ? 'x' : ' '}] ${versionLabel(p)}`),
+      `\n${s.cyan(s.ask)}${s.bold('Choose what to install')}  ${s.dim(keyHelp)}`,
+      ...items.map(line),
+      s.dim(`  ${ticked} of ${items.length} ticked`),
     ];
-    out.write(`${lines.join('\n')}\n`);
-    drawn = lines.length;
+    const text = lines.join('\n');
+    out.write(`${text}\n`);
+    drawn = text.split('\n').length;
   };
   const keys = {
     up: () => {
@@ -540,6 +607,7 @@ function checklist(items) {
     const done = (value) => {
       stdin.off('keypress', onKey);
       stdin.off('end', onEnd);
+      if (out.isTTY) out.write('\x1b[?25h');
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       resolve(value);
@@ -553,6 +621,7 @@ function checklist(items) {
     };
     emitKeypressEvents(stdin);
     if (stdin.isTTY) stdin.setRawMode(true);
+    if (out.isTTY) out.write('\x1b[?25l'); // hide the cursor while the list is up
     stdin.on('keypress', onKey);
     stdin.on('end', onEnd);
     stdin.resume();
@@ -563,7 +632,8 @@ function checklist(items) {
 // ---------------------------------------------------------------- install flow
 
 function printRun(r) {
-  console.log(`\n${r.dryRun ? 'Would run' : 'Runs'}: npm install --global ${r.plan.map((p) => p.spec).join(' ')}`);
+  const s = OUT;
+  console.log(`\n${s.bold(r.dryRun ? 'Would run:' : 'Runs:')} ${s.dim('npm install --global')} ${s.cyan(r.plan.map((p) => p.spec).join(' '))}`);
 }
 
 // A terminal to ask in. REGLOBAL_ASSUME_TTY=1 lets the tests answer through a pipe.
@@ -579,7 +649,7 @@ function checkInstallOptions(opts, json, env) {
 }
 
 function cancelled(message) {
-  console.log(message);
+  console.log(OUT.yellow(message));
   return 3;
 }
 
@@ -614,7 +684,7 @@ async function install(opts, json, env = process.env) {
   };
   if (!json) printList(r);
   if (!r.plan.length) {
-    if (!json) console.log('\nNothing to install.');
+    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Nothing to install.`)}`);
     return report(2);
   }
   if (!json && !opts.interactive) printRun(r);
@@ -630,12 +700,12 @@ async function install(opts, json, env = process.env) {
   r.installed = r.plan.filter((p) => after.has(p.name)).map((p) => p.name);
   r.failed = r.plan.filter((p) => !after.has(p.name)).map((p) => p.name);
   if (r.npmExitCode === 0 && !r.failed.length) {
-    if (!json) console.log(`Installed ${r.installed.length} package(s) into Node ${r.to.version}.`);
+    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Installed ${plural(r.installed.length, 'package')} into Node ${r.to.version}.`)}`);
     return report(0);
   }
   const message = `npm exited with ${r.npmExitCode}; not installed: ${r.failed.join(', ') || 'none'}`;
   r.error = { code: 'INSTALL_FAILED', message };
-  if (!json) console.error(`reglobal: ${message}`);
+  if (!json) console.error(`${ERR.red('reglobal:')} ${message}`);
   return report(1);
 }
 
@@ -672,7 +742,7 @@ function parse(args) {
 function fail(err, json) {
   const code = err instanceof UsageError ? err.code : 'ERROR';
   if (json) console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, error: { code, message: err.message } }, null, 2));
-  else console.error(`reglobal: ${err.message}`);
+  else console.error(`${ERR.red('reglobal:')} ${err.message}`);
   return 1;
 }
 
