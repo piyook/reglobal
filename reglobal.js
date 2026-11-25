@@ -1060,6 +1060,19 @@ function parseVersions(values, positionals) {
   return values;
 }
 
+// --list or --compare: show, install nothing. 0 shown.
+async function readOnly(opts, json) {
+  if (opts.list && opts.compare) throw new UsageError('BAD_OPTION', '--list and --compare do not go together: --list shows one version, --compare two');
+  const mode = opts.list ? 'list' : 'compare';
+  const extra = INSTALL_ONLY.find((o) => opts[o]);
+  if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --${mode}, which installs nothing`);
+  if (mode === 'list') checkListOptions(opts);
+  const result = mode === 'list' ? listing(opts) : await comparison(opts);
+  if (json) console.log(JSON.stringify(result, null, 2));
+  else (mode === 'list' ? printListing : printComparison)(result);
+  return 0;
+}
+
 function fail(err, json) {
   const code = err instanceof UsageError ? err.code : 'ERROR';
   if (json) console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, error: { code, message: err.message } }, null, 2));
@@ -1081,17 +1094,8 @@ export async function main(argv) {
       return 0;
     }
     if (opts.command === 'export') return exportCmd(opts, json);
-    if (opts.list && opts.compare) throw new UsageError('BAD_OPTION', '--list and --compare do not go together: --list shows one version, --compare two');
-    const mode = opts.list ? 'list' : opts.compare ? 'compare' : null;
-    if (!mode) return await install(opts, json);
-    const extra = INSTALL_ONLY.find((o) => opts[o]);
-    if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --${mode}, which installs nothing`);
-    if (mode === 'list') checkListOptions(opts);
-    const result = mode === 'list' ? listing(opts) : await comparison(opts);
-    if (json) console.log(JSON.stringify(result, null, 2));
-    else if (mode === 'list') printListing(result);
-    else printComparison(result);
-    return 0;
+    if (opts.list || opts.compare) return await readOnly(opts, json);
+    return await install(opts, json);
   } catch (err) {
     return fail(err, json);
   }
