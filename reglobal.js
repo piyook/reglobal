@@ -3,11 +3,10 @@
 // packages you had in an older one. Reads the old version's global
 // node_modules folder directly, so the old npm (or Node) never has to run.
 // No dependencies on purpose: it must work in a fresh Node with no globals.
-//
-// Still to write: export and import.
+// `export` and `import` move the list through a JSON file instead.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { emitKeypressEvents } from 'node:readline';
@@ -20,6 +19,8 @@ const SCHEMA_VERSION = 1;
 const HELP = `Usage: reglobal [<old> [<new>]] [--dry-run | --yes | -i] [--skip <names> | --only <names>]
                 [--keep-versions] [--offline] [--json]
        reglobal --list [<old> [<new>]] [--offline] [--json]
+       reglobal export [<file>] [--from <version>] [--yes] [--json]
+       reglobal import <file> [<new>] [the install options above]
 
 Reinstall the global npm packages from an old Node version into a new one.
 Asks before installing.
@@ -28,6 +29,10 @@ Asks before installing.
   reglobal 24 26             the newest installed 24.x into the newest 26.x
   reglobal 24                from the newest 24.x into the Node in use
   reglobal                   from the newest other version into the Node in use
+
+  reglobal export globals.json    save the Node in use's globals to a file
+                                  (--from 24 for another version; no file: stdout)
+  reglobal import globals.json    install them from the file, on any machine
 
 <old> and <new> are versions (24, 24.1, 24.1.0) or a version's install folder.
 <new> defaults to the Node in use; installing into another one runs that
@@ -53,9 +58,7 @@ At the question, answer e to type the names of packages to leave out.
 
 Finds versions installed by fnm, nvm, nvm-windows, mise, asdf and n.
 
-Exit codes: 0 done, 1 error, 2 nothing to install, 3 cancelled.
-
-Not built yet: export, import.`;
+Exit codes: 0 done, 1 error, 2 nothing to install, 3 cancelled.`;
 
 // Packages that come with Node itself: never reinstall them.
 const BUNDLED = new Set(['npm', 'corepack']);
@@ -217,13 +220,17 @@ function nodeIn(prefix) {
   return process.platform === 'win32' ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
 }
 
+// The Node in use: its version, and its manager when it is one we found.
+function currentNode(versions, env) {
+  const dir = currentGlobalDir(env);
+  const known = versions.find((v) => sameDir(v.dir, dir));
+  return { version: process.versions.node, manager: known?.manager ?? null, dir };
+}
+
 // The Node to install into: the one asked for, or the one running reglobal.
 // `node` is that version's own node, which runs its own npm.
 function resolveTarget(spec, versions, env) {
-  if (!spec) {
-    const dir = currentGlobalDir(env);
-    return { version: process.versions.node, manager: null, dir, node: process.execPath, current: true };
-  }
+  if (!spec) return { ...currentNode(versions, env), node: process.execPath, current: true };
   const found = looksLikePath(spec) ? fromPath(expandHome(spec)) : matchVersion(spec, versions, 'the new version');
   if (!found) throw new UsageError('NOT_FOUND', `no installed Node ${spec} to install into (installed: ${installedList(versions)})`);
   const dir = found.dir;
@@ -231,6 +238,16 @@ function resolveTarget(spec, versions, env) {
   const node = current ? process.execPath : nodeIn(prefixOf(dir));
   if (!existsSync(node)) throw new UsageError('NO_NODE', `no node in ${prefixOf(dir)}: is Node ${spec} installed there?`);
   return { version: current ? process.versions.node : found.version, manager: found.manager, dir, node, current };
+}
+
+// The Node to export from: the one asked for (any installed version, or a
+// folder), or the one in use. Its node never runs, so it needn't work.
+function resolveSource(spec, versions, env) {
+  if (!spec) return currentNode(versions, env);
+  if (looksLikePath(spec)) return fromPath(expandHome(spec));
+  const found = matchVersion(spec, versions, 'the version to export');
+  if (!found) throw new UsageError('NOT_FOUND', `no installed Node ${spec} (installed: ${installedList(versions)})`);
+  return found;
 }
 
 // ---------------------------------------------------------------- packages
@@ -272,7 +289,10 @@ function readPackage(dir, name, lock) {
   const info = { name, version: pkg?.version ?? locked.version ?? null };
   if (lstatSync(full).isSymbolicLink() || locked.link) {
     info.status = 'linked';
-    info.link = locked.resolved ?? readlinkSync(full);
+    // Always absolute, so the path still means something in an export: the
+    // lockfile's is relative to the folder holding node_modules, and a
+    // symlink's to the folder the link sits in.
+    info.link = locked.resolved ? path.resolve(path.dirname(dir), locked.resolved) : path.resolve(path.dirname(full), readlinkSync(full));
     return info;
   }
   if (!pkg) {
@@ -404,10 +424,10 @@ function row(p, widths, s) {
 function printList(r) {
   const s = OUT;
   const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
-  const from = nodeName(r.from);
+  const from = r.from.file ? `${path.basename(r.from.file)} (${nodeName(r.from)})` : nodeName(r.from);
   const to = nodeName(r.to);
   const w = Math.max(from.length, to.length);
-  console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.dir)}`);
+  console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.file ?? r.from.dir)}`);
   console.log(`${s.bold('To')}   ${to.padEnd(w)}  ${s.dim(r.to.dir)}\n`);
   if (!r.packages.length) console.log(s.dim('  no global packages'));
   const widths = { name: nameWidth(r.packages), version: Math.max(0, ...r.packages.map((p) => visible(versionPart(p, s)))) };
@@ -457,15 +477,22 @@ async function addLatest(r, env) {
   if (found.every((v) => v === null)) r.warnings.push(`could not get the latest versions from ${registry}: pass --offline to skip the lookup`);
 }
 
+// The old side: an export file, or an installed version's globals.
+function oldSide(opts, versions, target) {
+  if (opts.import) return readExport(opts.import);
+  const from = resolveFrom(opts.from, versions, target.dir);
+  return { from: { version: from.version, manager: from.manager, dir: from.dir }, packages: readGlobals(from.dir) };
+}
+
 async function list(opts, env = process.env) {
   const versions = findVersions(env);
   const target = resolveTarget(opts.to, versions, env);
-  const from = resolveFrom(opts.from, versions, target.dir);
-  const packages = compare(readGlobals(from.dir), readGlobals(target.dir));
+  const old = oldSide(opts, versions, target);
+  const packages = compare(old.packages, readGlobals(target.dir));
   const r = {
     schemaVersion: SCHEMA_VERSION,
     command: 'list',
-    from: { version: from.version, manager: from.manager, dir: from.dir },
+    from: old.from,
     to: { version: target.version, manager: target.manager, dir: target.dir },
     packages,
     summary: summarize(packages),
@@ -475,6 +502,142 @@ async function list(opts, env = process.env) {
   // Not enumerable, so it stays out of the JSON: install needs the node to run.
   Object.defineProperty(r, 'target', { value: target });
   return r;
+}
+
+// ---------------------------------------------------------------- export and import
+
+const EXPORT_KIND = 'reglobal-export';
+
+// One package as it goes in an export file. npm and corepack come with every
+// Node, and a broken folder has nothing to say, so they are left out.
+function exportEntry(p) {
+  const e = { name: p.name, version: p.version };
+  if (p.status === 'linked') return Object.assign(e, { status: 'linked', link: p.link });
+  return Object.assign(e, { source: p.source }, p.resolved ? { resolved: p.resolved } : {});
+}
+
+const EXPORT_CONFLICTS = ['to', 'list', 'dry-run', 'keep-versions', 'skip', 'only', 'interactive', 'offline'];
+
+// 0 written. With no file the export goes to stdout; a file that exists is
+// only overwritten with --yes, so `reglobal export package.json` can't destroy it.
+function exportCmd(opts, json, env = process.env) {
+  const extra = EXPORT_CONFLICTS.find((o) => opts[o]);
+  if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with export`);
+  const src = resolveSource(opts.from, findVersions(env), env);
+  const packages = readGlobals(src.dir)
+    .filter((p) => p.status !== 'broken' && !BUNDLED.has(p.name))
+    .map(exportEntry);
+  const data = {
+    schemaVersion: SCHEMA_VERSION,
+    kind: EXPORT_KIND,
+    exportedAt: new Date().toISOString(),
+    from: { version: src.version, manager: src.manager },
+    packages,
+  };
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  if (!opts.file) {
+    process.stdout.write(text);
+    return 0;
+  }
+  const file = path.resolve(expandHome(opts.file));
+  writeExport(file, text, opts.yes);
+  if (json) console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, command: 'export', file, from: data.from, packages: packages.length }, null, 2));
+  else console.log(OUT.green(`${OUT.ok}Exported ${plural(packages.length, 'package')} from Node ${src.version ?? '?'} to ${file}`));
+  return 0;
+}
+
+// 'wx' creates the file only if nothing is there, checked and created in one
+// step. On POSIX it also fails on a symlink that points nowhere, but Windows
+// follows the link and creates its target, so a symlink is refused first.
+// --yes overwrites.
+function writeExport(file, text, overwrite) {
+  const exists = () => new UsageError('FILE_EXISTS', `${file} already exists: pass --yes to overwrite it, or pick another name`);
+  if (!overwrite) {
+    let isLink = false;
+    try {
+      isLink = lstatSync(file).isSymbolicLink();
+    } catch {
+      // nothing there: 'wx' below creates it
+    }
+    if (isLink) throw exists();
+  }
+  try {
+    writeFileSync(file, text, { flag: overwrite ? 'w' : 'wx' });
+  } catch (err) {
+    if (err.code === 'EEXIST') throw exists();
+    if (err.code === 'ENOENT') throw new UsageError('NOT_FOUND', `the folder ${path.dirname(file)} does not exist`);
+    if (err.code === 'EISDIR') throw new UsageError('BAD_OPTION', `${file} is a folder: give a file name`);
+    throw err;
+  }
+}
+
+// npm package names: an optional @scope/, then letters, digits and - . _ ~,
+// never starting with - or . (so a name can't pass for an npm option).
+const PACKAGE_NAME = /^(@[a-z0-9][\w.~-]*\/)?[a-z0-9][\w.~-]*$/i;
+const VERSION_TEXT = /^[0-9A-Za-z.+-]+$/;
+
+function badFile(file, why) {
+  return new UsageError('BAD_FILE', `${file} ${why}`);
+}
+
+// Control characters (C0, DEL and C1) in text from a file could move the
+// cursor or recolour the terminal, and hide a warning before the question.
+const isControl = (ch) => {
+  const n = ch.codePointAt(0);
+  return n < 32 || (n >= 127 && n < 160);
+};
+const hasControl = (s) => [...s].some(isControl);
+const stripControl = (s) => [...s].filter((ch) => !isControl(ch)).join('');
+
+// An export file could come from anywhere: keep only what reglobal itself
+// would have written, and work out each source again from `resolved`.
+function importEntry(e, i, file) {
+  if (!e || typeof e.name !== 'string' || !PACKAGE_NAME.test(e.name)) throw badFile(file, `has no valid package name in entry ${i + 1}`);
+  const version = typeof e.version === 'string' && VERSION_TEXT.test(e.version) ? e.version : null;
+  if (e.status === 'linked') return { name: e.name, version, status: 'linked', link: stripControl(String(e.link ?? '?')) };
+  const resolved = typeof e.resolved === 'string' ? e.resolved : null;
+  // A URL is handed to npm, so a bad one is refused rather than tidied up.
+  if (resolved && hasControl(resolved)) throw badFile(file, `has control characters in the source of ${e.name}`);
+  const source = sourceOf(resolved);
+  return { name: e.name, version, source, ...(source === 'registry' ? {} : { resolved }) };
+}
+
+// Text as Windows tools save it too: PowerShell 5.1's `>` writes UTF-16 with
+// a byte order mark, and other tools put a BOM before UTF-8.
+function decodeText(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString('utf16le');
+  if (buf[0] === 0xfe && buf[1] === 0xff) return Buffer.from(buf.subarray(2)).swap16().toString('utf16le');
+  const text = buf.toString('utf8');
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function checkSchema(data, file) {
+  if (data?.kind !== EXPORT_KIND || !Array.isArray(data.packages)) throw badFile(file, 'is not a reglobal export (make one with reglobal export <file>)');
+  const v = data.schemaVersion;
+  if (!Number.isInteger(v) || v < 1) throw badFile(file, 'has no valid schemaVersion: make it again with reglobal export <file>');
+  if (v > SCHEMA_VERSION) throw badFile(file, 'was made by a newer reglobal: update reglobal');
+}
+
+function readExport(spec) {
+  const file = path.resolve(expandHome(spec));
+  let data;
+  try {
+    data = JSON.parse(decodeText(readFileSync(file)));
+  } catch (err) {
+    if (err.code === 'ENOENT') throw new UsageError('NOT_FOUND', `no file ${file}`);
+    throw badFile(file, 'is not a JSON file');
+  }
+  checkSchema(data, file);
+  const byName = new Map();
+  data.packages.forEach((e, i) => {
+    const p = importEntry(e, i, file);
+    if (!byName.has(p.name)) byName.set(p.name, p);
+  });
+  const text = (v) => (typeof v === 'string' && v.length < 40 ? stripControl(v) : null);
+  return {
+    from: { version: text(data.from?.version), manager: text(data.from?.manager), dir: null, file },
+    packages: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  };
 }
 
 // ---------------------------------------------------------------- install
@@ -556,7 +719,8 @@ function checkNames(r, names) {
   for (const name of names) {
     if (plan.has(name)) continue;
     const pkg = r.packages.find((p) => p.name === name);
-    const why = pkg ? `its status is ${pkg.status}` : `Node ${r.from.version ?? '(old)'} has no global package by that name`;
+    const old = r.from.file ? path.basename(r.from.file) : `Node ${r.from.version ?? '(old)'}`;
+    const why = pkg ? `its status is ${pkg.status}` : `${old} has no global package by that name`;
     throw new UsageError('BAD_NAME', `${name} is not one of the packages to install: ${why}`);
   }
 }
@@ -800,14 +964,44 @@ function parse(args) {
     throw new UsageError('BAD_OPTION', `${e.message.split('\n')[0]} (see reglobal --help)`);
   }
   const { values, positionals } = parsed;
+  const [first, ...rest] = positionals;
+  if (first === 'export') return parseExport(values, rest);
+  if (first === 'import') return parseImport(values, rest);
+  return parseVersions(values, positionals);
+}
+
+function setTarget(values, target) {
+  if (target === undefined) return;
+  if (values.to) throw new UsageError('BAD_OPTION', `give the new version once: ${target} or --to ${values.to}`);
+  values.to = target;
+}
+
+function parseExport(values, rest) {
+  if (rest.length > 1) throw new UsageError('BAD_OPTION', 'export takes one file: reglobal export [<file>] [--from <version>]');
+  // `reglobal export 24` most likely means Node 24, not a file called 24.
+  if (/^v?\d+(\.\d+){0,2}$/.test(rest[0] ?? '')) {
+    throw new UsageError('BAD_OPTION', `${rest[0]} looks like a version: use --from ${rest[0]} to export it (or ./${rest[0]} for a file by that name)`);
+  }
+  return Object.assign(values, { command: 'export', file: rest[0] });
+}
+
+function parseImport(values, rest) {
+  const [file, target, ...extra] = rest;
+  if (file === undefined) throw new UsageError('BAD_OPTION', 'import needs a file: reglobal import <file> [<new>]');
+  if (values.from) throw new UsageError('BAD_OPTION', '--from does not go with import: the file is the old version');
+  if (extra.length) throw new UsageError('BAD_OPTION', 'too many arguments: import takes a file, then the new version');
+  setTarget(values, target);
+  return Object.assign(values, { import: file });
+}
+
+function parseVersions(values, positionals) {
   const [old, target, ...extra] = positionals;
   const notVersion = positionals.find((p) => !looksLikePath(p) && !/^v?\d+(\.\d+){0,2}$/.test(p));
   if (notVersion) throw new UsageError('UNKNOWN_COMMAND', `unknown command ${notVersion} (see reglobal --help)`);
   if (extra.length) throw new UsageError('BAD_OPTION', `too many versions: ${positionals.join(' ')}. Give the old one, then the new one.`);
   if (old !== undefined && values.from) throw new UsageError('BAD_OPTION', `give the old version once: ${old} or --from ${values.from}`);
-  if (target !== undefined && values.to) throw new UsageError('BAD_OPTION', `give the new version once: ${target} or --to ${values.to}`);
   if (old !== undefined) values.from = old;
-  if (target !== undefined) values.to = target;
+  setTarget(values, target);
   return values;
 }
 
@@ -831,6 +1025,7 @@ export async function main(argv) {
       console.log(VERSION);
       return 0;
     }
+    if (opts.command === 'export') return exportCmd(opts, json);
     if (!opts.list) return await install(opts, json);
     const extra = INSTALL_ONLY.find((o) => opts[o]);
     if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --list, which installs nothing`);

@@ -2,8 +2,6 @@
 
 > CLI that reinstalls the global npm packages from one Node version into another, for example after `fnm use 26`. Use it when a user has switched or upgraded Node and their global commands are missing, instead of listing and installing them yourself. Run it with `npx reglobal` (preferred: a global install belongs to one Node version, so it is missing after a switch), or `npm install -g reglobal`. Node >= 22, no dependencies.
 
-Work in progress: `export` and `import` are not built yet.
-
 ## Workflow
 
 1. Name the two versions: `reglobal <old> <new>`, for example `reglobal 24.22.3 26.13.1` or `reglobal 24 26`. With only `<old>`, it installs into the Node in use, the one running reglobal (`node --version`).
@@ -31,6 +29,31 @@ At the prompt (a terminal, no `--yes`), `y` installs, `e` asks for names to leav
 Versions are found by reading folders, never by running the old Node or npm: fnm (`FNM_DIR`, or its default folder), nvm (`NVM_DIR`, `~/.nvm`), nvm-windows (`NVM_HOME`), mise (`MISE_DATA_DIR`), asdf (`ASDF_DATA_DIR`, `~/.asdf`) and n (`N_PREFIX`, `/usr/local`). For anything else, pass `--from <path>`. The current Node's globals are in the npm prefix (`npm_config_prefix`), or next to `node`.
 
 Installing is one `npm install --global -- <specs>` run by the current Node with its own npm (`npm-cli.js` next to `node`, or the first on PATH), never through a shell. `REGLOBAL_NPM_CLI=<path to npm-cli.js>` picks another.
+
+## Export and import
+
+For another machine or manager, or when the old version is gone:
+
+- `reglobal export [<file>] [--from <version|path>] [--yes] [--json]` writes the globals of the Node in use (or `--from`) as JSON. With no file, it goes to stdout. An existing file is only overwritten with `--yes`; otherwise it exits 1 with `FILE_EXISTS`. npm, corepack and broken folders are left out, and npm links are kept with `"status": "linked"` and their local path. With `--json` and a file, stdout gets `{ "schemaVersion": 1, "command": "export", "file", "from", "packages": <count> }`.
+- `reglobal import <file> [<new>]` (or `--to`) installs from the file with the normal workflow and options above: preview with `--dry-run --json`, then `--yes`. `--list` compares. `--from` does not go with it. In the JSON, `from` is `{ "version", "manager", "dir": null, "file" }`.
+
+The file:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "reglobal-export",
+  "exportedAt": "2026-11-25T18:41:33.678Z",
+  "from": { "version": "24.3.0", "manager": "fnm" },
+  "packages": [
+    { "name": "typescript", "version": "5.4.0", "source": "registry" },
+    { "name": "from-git", "version": "1.0.0", "source": "git", "resolved": "git+https://github.com/someone/from-git.git#abc" },
+    { "name": "my-tool", "version": "0.1.0", "status": "linked", "link": "/home/me/src/my-tool" }
+  ]
+}
+```
+
+Import treats the file as untrusted. Each `name` must be a valid npm package name, or it exits 1 with `BAD_FILE` and installs nothing. A `version` that isn't plain version text is dropped (it gets `@latest`), and `source` is worked out again from `resolved`, not taken from the file. A file that isn't a reglobal export, isn't JSON, or has a newer `schemaVersion` also exits 1 with `BAD_FILE`.
 
 ## JSON
 
@@ -73,7 +96,7 @@ Installing (`--dry-run --json`, `--yes --json`) prints the same fields, with `"c
 
 `npmExitCode`, `installed` and `failed` are only there after npm ran. A package counts as installed when its folder is in this Node's globals afterwards. On failure the same object also has `error`.
 
-Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_VERSION`, `BAD_NAME`, `NEEDS_YES`, `NEEDS_TERMINAL`, `NO_NODE`, `NO_NPM`, `INSTALL_FAILED`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`.
+Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_VERSION`, `BAD_NAME`, `BAD_FILE`, `FILE_EXISTS`, `NEEDS_YES`, `NEEDS_TERMINAL`, `NO_NODE`, `NO_NPM`, `INSTALL_FAILED`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`.
 
 ## Exit codes
 
