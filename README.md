@@ -63,7 +63,9 @@ npx reglobal import globals.json 26        # or into Node 26
 
 `export` writes a small JSON file of names, versions and where each package came from. With no file name, it prints to the screen. It won't overwrite a file that's already there unless you add `--yes`. `npm link` folders are kept in the file, with their local path, so import can warn about them.
 
-`import` works exactly like `reglobal <old> <new>`, with the file as the old version. It shows the list and asks first, and takes the same options. `import globals.json --list` shows what's in the file, and `--compare` compares it with the Node it would install into. Packages already installed are left alone, so it's safe to run again. It checks the file before using it: every name must be a valid npm package name, and anything not from the registry is flagged.
+`import` works exactly like `reglobal <old> <new>`, with the file as the old version. It shows the list and asks first, and takes the same options. `import globals.json --list` shows what's in the file, and `--compare` compares it with the Node it would install into. Packages already installed are left alone, so it's safe to run again. It checks the file before using it: every name must be a valid npm package name, git and tarball sources must use https or ssh, and anything not from the registry is flagged.
+
+Only import files you trust. Installing a package runs its install scripts, so look at the list before you answer `y`, especially anything that comes from git or a URL.
 
 ### Why npx
 

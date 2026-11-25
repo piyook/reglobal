@@ -666,6 +666,48 @@ describe('latest versions', () => {
     assert.equal(r.packages[0].latest, null);
     assert.match(r.warnings.at(-1), /could not get the latest versions from http:\/\/127\.0\.0\.1:9\/: pass --offline/);
   });
+
+  // The fake registry logs every name it is asked for, so a name that must go
+  // elsewhere can be checked never to reach it.
+  function scoped(names) {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    for (const name of names) pkg(old, name, '1.0.0');
+    return m;
+  }
+  const NOWHERE = 'http://127.0.0.1:9/';
+
+  test("a scope's own registry in the user's .npmrc keeps its names off the default one", () => {
+    const m = scoped(['@private-a/tool', 'npmrc-public-a']);
+    writeFileSync(path.join(m.home, '.npmrc'), `; a comment\n@private-a:registry=${NOWHERE}\n`);
+    compareJson(m);
+    assert.equal(registryAsked().includes('@private-a/tool'), false);
+    assert.equal(registryAsked().includes('npmrc-public-a'), true);
+  });
+
+  test('the global npmrc of the Node installed into, and npm_config_ variables, count too', () => {
+    const m = scoped(['@private-b/tool', '@private-c/tool']);
+    const etc = path.join(prefixOfModules(m.current), 'etc');
+    mkdirSync(etc, { recursive: true });
+    writeFileSync(path.join(etc, 'npmrc'), `@private-b:registry=${NOWHERE}\n`);
+    m.env['npm_config_@private-c:registry'] = NOWHERE;
+    compareJson(m);
+    assert.equal(registryAsked().includes('@private-b/tool'), false);
+    assert.equal(registryAsked().includes('@private-c/tool'), false);
+  });
+
+  test("the registry in the user's .npmrc is used when no variable sets one, with variables filled in", () => {
+    const m = scoped(['npmrc-public-d']);
+    const port = new URL(m.env.npm_config_registry).port;
+    delete m.env.npm_config_registry;
+    m.env.REGISTRY_PORT = port;
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: npm's own ${VAR} syntax, not a template
+    writeFileSync(path.join(m.home, '.npmrc'), 'registry="http://127.0.0.1:${REGISTRY_PORT}/"\n');
+    compareJson(m);
+    assert.equal(registryAsked().includes('npmrc-public-d'), true);
+    writeFileSync(path.join(m.home, '.npmrc'), `registry=${NOWHERE}\n`);
+    assert.match(compareJson(m).warnings.at(-1), /could not get the latest versions from http:\/\/127\.0\.0\.1:9\//);
+  });
 });
 
 describe('choosing packages', () => {
@@ -1106,6 +1148,39 @@ describe('import', () => {
       ['git+https://example.com/sneaky.git'],
     );
     assert.match(out.json.warnings.join('\n'), /sneaky is reinstalled from git/);
+  });
+
+  test('only https, git over https or ssh, and host shorthands are installed from a file', () => {
+    const ok = [
+      'git+https://github.com/someone/a.git#abc',
+      'git+ssh://git@github.com/someone/a.git#abc',
+      'https://example.com/a-1.0.0.tgz',
+      'github:someone/a#main',
+      'gitlab:someone/a',
+      'bitbucket:some-one/a.b',
+    ];
+    for (const resolved of ok) {
+      const { m, file } = setup([{ name: 'a', version: '1.0.0', resolved }]);
+      const out = listJsonInstall(m, ['import', file, '--dry-run']);
+      assert.equal(out.code, 0, `${resolved}: ${JSON.stringify(out.json.error)}`);
+    }
+    const bad = [
+      'http://example.com/a-1.0.0.tgz',
+      'git://github.com/someone/a.git',
+      'git+http://github.com/someone/a.git',
+      'git+ssh://-oProxyCommand=calc/a.git',
+      'git+ssh://-oProxyCommand=calc@github.com/a.git',
+      'git+file:///tmp/a.git',
+      'github:-x/a',
+      'https://example.com/a b.tgz',
+    ];
+    for (const resolved of bad) {
+      const { m, file } = setup([{ name: 'a', version: '1.0.0', resolved }]);
+      const out = listJsonInstall(m, ['import', file, '--dry-run']);
+      assert.equal(out.code, 1, resolved);
+      assert.equal(out.json.error.code, 'BAD_FILE', resolved);
+      assert.match(out.json.error.message, /has a source for a that reglobal will not install/, resolved);
+    }
   });
 
   test('a version that is not a plain version is dropped, not passed to npm', () => {
