@@ -18,9 +18,12 @@ const SCHEMA_VERSION = 1;
 
 const HELP = `Usage: reglobal [<old> [<new>]] [--dry-run | --yes | -i] [--skip <names> | --only <names>]
                 [--keep-versions] [--offline] [--json]
-       reglobal --list [<old> [<new>]] [--offline] [--json]
+       reglobal --list [<version>] [--json]
+       reglobal --compare [<old> [<new>]] [--offline] [--json]
        reglobal export [<file>] [--from <version>] [--yes] [--json]
        reglobal import <file> [<new>] [the install options above]
+       reglobal import <file> --list
+       reglobal import <file> [<new>] --compare
 
 Reinstall the global npm packages from an old Node version into a new one.
 Asks before installing.
@@ -33,6 +36,9 @@ Asks before installing.
   reglobal export globals.json    save the Node in use's globals to a file
                                   (--from 24 for another version; no file: stdout)
   reglobal import globals.json    install them from the file, on any machine
+
+  reglobal --list            the globals of the Node in use (--list 24 for Node 24)
+  reglobal --compare 24 26   what Node 24 has and Node 26 hasn't, installing nothing
 
 <old> and <new> are versions (24, 24.1, 24.1.0) or a version's install folder.
 <new> defaults to the Node in use; installing into another one runs that
@@ -49,7 +55,8 @@ Options:
   --only <names>   install only these packages
   -i, --interactive  tick and untick packages in a checklist before installing
   --offline        don't look up the latest versions on the registry
-  --list           show the old version's globals next to this one's (read-only)
+  --list           show one version's globals, or a file's (read-only)
+  --compare        show the old version's globals next to the new one's (read-only)
   --json           print JSON on stdout
 
 At the question, answer e to type the names of packages to leave out.
@@ -313,7 +320,7 @@ function readGlobals(dir) {
     .map((name) => readPackage(dir, name, lock));
 }
 
-// ---------------------------------------------------------------- list
+// ---------------------------------------------------------------- compare
 
 function statusOf(pkg, here) {
   if (pkg.status) return pkg.status;
@@ -323,7 +330,7 @@ function statusOf(pkg, here) {
   return pkg.source === 'file' ? 'manual' : 'install';
 }
 
-function compare(oldPkgs, currentPkgs) {
+function matchUp(oldPkgs, currentPkgs) {
   const current = new Map(currentPkgs.map((p) => [p.name, p]));
   return oldPkgs.map((p) => {
     const here = current.get(p.name);
@@ -400,7 +407,7 @@ function versionPart(p, s) {
 
 function noteFor(p) {
   if (p.status === 'present') return `(here: ${p.currentVersion})`;
-  if (p.status === 'skipped') return '(comes with Node)';
+  if (p.status === 'skipped' || p.status === 'bundled') return '(comes with Node)';
   if (p.status === 'linked') return `(npm link to ${p.link})`;
   if (p.status === 'broken') return '(no package.json)';
   if (p.source && p.source !== 'registry') return `(from ${p.source}: ${p.resolved})`;
@@ -421,10 +428,13 @@ function row(p, widths, s) {
   return `  ${label}  ${name}  ${note ? `${padStyled(version, widths.version)}  ${s.dim(note)}` : version}`.trimEnd();
 }
 
-function printList(r) {
+const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
+// "Node 24.3.0 (fnm)", or "globals.json (Node 22.1.0 (nvm))" for an export file.
+const sideName = (v) => (v.file ? `${path.basename(v.file)} (${nodeName(v)})` : nodeName(v));
+
+function printComparison(r) {
   const s = OUT;
-  const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
-  const from = r.from.file ? `${path.basename(r.from.file)} (${nodeName(r.from)})` : nodeName(r.from);
+  const from = sideName(r.from);
   const to = nodeName(r.to);
   const w = Math.max(from.length, to.length);
   console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.file ?? r.from.dir)}`);
@@ -484,14 +494,14 @@ function oldSide(opts, versions, target) {
   return { from: { version: from.version, manager: from.manager, dir: from.dir }, packages: readGlobals(from.dir) };
 }
 
-async function list(opts, env = process.env) {
+async function comparison(opts, env = process.env) {
   const versions = findVersions(env);
   const target = resolveTarget(opts.to, versions, env);
   const old = oldSide(opts, versions, target);
-  const packages = compare(old.packages, readGlobals(target.dir));
+  const packages = matchUp(old.packages, readGlobals(target.dir));
   const r = {
     schemaVersion: SCHEMA_VERSION,
-    command: 'list',
+    command: 'compare',
     from: old.from,
     to: { version: target.version, manager: target.manager, dir: target.dir },
     packages,
@@ -502,6 +512,50 @@ async function list(opts, env = process.env) {
   // Not enumerable, so it stays out of the JSON: install needs the node to run.
   Object.defineProperty(r, 'target', { value: target });
   return r;
+}
+
+// ---------------------------------------------------------------- list
+
+// One version's globals, or an export file's, as they are: nothing compared,
+// nothing looked up. npm and corepack are marked as coming with Node.
+function listing(opts, env = process.env) {
+  let side;
+  if (opts.import) side = readExport(opts.import);
+  else {
+    const src = resolveSource(opts.from, findVersions(env), env);
+    side = { from: { version: src.version, manager: src.manager, dir: src.dir }, packages: readGlobals(src.dir) };
+  }
+  const packages = side.packages.map((p) => (!p.status && BUNDLED.has(p.name) ? { ...p, status: 'bundled' } : p));
+  const count = (status) => packages.filter((p) => p.status === status).length;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    command: 'list',
+    node: side.from,
+    packages,
+    summary: { packages: packages.length, bundled: count('bundled'), linked: count('linked'), broken: count('broken') },
+  };
+}
+
+function printListing(r) {
+  const s = OUT;
+  console.log(`${s.bold(sideName(r.node))}  ${s.dim(r.node.file ?? r.node.dir)}\n`);
+  if (!r.packages.length) console.log(s.dim('  no global packages'));
+  const widths = { name: nameWidth(r.packages), version: Math.max(0, ...r.packages.map((p) => (p.version ?? '').length)) };
+  for (const p of r.packages) {
+    const note = noteFor(p);
+    const color = p.status === 'broken' ? s.red : p.status === 'linked' ? s.yellow : String;
+    console.log(`  ${color(p.name.padEnd(widths.name))}  ${(p.version ?? '').padEnd(widths.version)}  ${s.dim(note)}`.trimEnd());
+  }
+  console.log(`\n${plural(r.packages.length, 'package')}`);
+}
+
+// --list with a second version, or --to, most likely meant the comparison.
+function checkListOptions(opts) {
+  if (opts.offline) throw new UsageError('BAD_OPTION', '--offline does not go with --list, which never asks the registry');
+  if (!opts.to) return;
+  if (opts.import)
+    throw new UsageError('BAD_OPTION', `--list shows the file alone: to compare it with Node ${opts.to}, use import ${opts.import} --compare ${opts.to}`);
+  throw new UsageError('BAD_OPTION', `--list shows one version: to compare two, use --compare ${opts.from ?? '<old>'} ${opts.to}`);
 }
 
 // ---------------------------------------------------------------- export and import
@@ -516,7 +570,7 @@ function exportEntry(p) {
   return Object.assign(e, { source: p.source }, p.resolved ? { resolved: p.resolved } : {});
 }
 
-const EXPORT_CONFLICTS = ['to', 'list', 'dry-run', 'keep-versions', 'skip', 'only', 'interactive', 'offline'];
+const EXPORT_CONFLICTS = ['to', 'list', 'compare', 'dry-run', 'keep-versions', 'skip', 'only', 'interactive', 'offline'];
 
 // 0 written. With no file the export goes to stdout; a file that exists is
 // only overwritten with --yes, so `reglobal export package.json` can't destroy it.
@@ -899,14 +953,14 @@ async function choose(r, opts, json, env) {
 // 0 installed, 1 failed, 2 nothing to install, 3 cancelled.
 async function install(opts, json, env = process.env) {
   checkInstallOptions(opts, json, env);
-  const r = Object.assign(await list(opts, env), { command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) });
+  const r = Object.assign(await comparison(opts, env), { command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) });
   makePlan(r);
   applyFilters(r, opts);
   const report = (code) => {
     if (json) console.log(JSON.stringify(r, null, 2));
     return code;
   };
-  if (!json) printList(r);
+  if (!json) printComparison(r);
   if (!r.plan.length) {
     if (!json) console.log(`\n${OUT.green(`${OUT.ok}Nothing to install.`)}`);
     return report(2);
@@ -941,6 +995,7 @@ const OPTIONS = {
   from: { type: 'string' },
   to: { type: 'string' },
   list: { type: 'boolean' },
+  compare: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   'keep-versions': { type: 'boolean' },
@@ -1026,12 +1081,16 @@ export async function main(argv) {
       return 0;
     }
     if (opts.command === 'export') return exportCmd(opts, json);
-    if (!opts.list) return await install(opts, json);
+    if (opts.list && opts.compare) throw new UsageError('BAD_OPTION', '--list and --compare do not go together: --list shows one version, --compare two');
+    const mode = opts.list ? 'list' : opts.compare ? 'compare' : null;
+    if (!mode) return await install(opts, json);
     const extra = INSTALL_ONLY.find((o) => opts[o]);
-    if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --list, which installs nothing`);
-    const result = await list(opts);
+    if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --${mode}, which installs nothing`);
+    if (mode === 'list') checkListOptions(opts);
+    const result = mode === 'list' ? listing(opts) : await comparison(opts);
     if (json) console.log(JSON.stringify(result, null, 2));
-    else printList(result);
+    else if (mode === 'list') printListing(result);
+    else printComparison(result);
     return 0;
   } catch (err) {
     return fail(err, json);

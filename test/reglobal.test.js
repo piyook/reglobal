@@ -125,8 +125,8 @@ function reglobal(args, env = baseEnv, input = '') {
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
-function listJson(m, ...args) {
-  const r = reglobal(['--list', '--json', ...args], m.env);
+function compareJson(m, ...args) {
+  const r = reglobal(['--compare', '--json', ...args], m.env);
   assert.equal(r.code, 0, r.stderr || r.stdout);
   return JSON.parse(r.stdout);
 }
@@ -199,15 +199,15 @@ describe('cli basics', () => {
   });
 
   test('--from without a value exits 1', () => {
-    const r = reglobal(['--list', '--from']);
+    const r = reglobal(['--compare', '--from']);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /--from/);
   });
 
-  test('--list does not take the install options', () => {
-    const r = reglobal(['--list', '--yes']);
+  test('--compare does not take the install options', () => {
+    const r = reglobal(['--compare', '--yes']);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /--yes does not go with --list/);
+    assert.match(r.stderr, /--yes does not go with --compare/);
   });
 
   test('errors are JSON with --json', () => {
@@ -224,7 +224,7 @@ describe('finding the old version', () => {
     const m = machine();
     fnmVersion(m, '22.1.0');
     fnmVersion(m, '24.3.0');
-    const r = listJson(m);
+    const r = compareJson(m);
     assert.equal(r.from.version, '24.3.0');
     assert.equal(r.from.manager, 'fnm');
   });
@@ -234,16 +234,16 @@ describe('finding the old version', () => {
     fnmVersion(m, '22.1.0');
     fnmVersion(m, '22.10.2');
     fnmVersion(m, '24.3.0');
-    assert.equal(listJson(m, '--from', '22').from.version, '22.10.2');
-    assert.equal(listJson(m, '--from', 'v22.1').from.version, '22.1.0');
-    assert.equal(listJson(m, '--from', '22.1.0').from.version, '22.1.0');
+    assert.equal(compareJson(m, '--from', '22').from.version, '22.10.2');
+    assert.equal(compareJson(m, '--from', 'v22.1').from.version, '22.1.0');
+    assert.equal(compareJson(m, '--from', '22.1.0').from.version, '22.1.0');
   });
 
   test('leaves out the version running now', () => {
     const m = machine();
     const only = fnmVersion(m, '24.3.0');
     m.env.NPM_CONFIG_PREFIX = prefixOfModules(only);
-    const r = reglobal(['--list'], m.env);
+    const r = reglobal(['--compare'], m.env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /no other Node version found \(installed: 24\.3\.0 \(fnm\)\)/);
   });
@@ -251,7 +251,7 @@ describe('finding the old version', () => {
   test('a version that is not installed exits 1 and lists what is', () => {
     const m = machine();
     fnmVersion(m, '24.3.0');
-    const r = reglobal(['--list', '--json', '--from', '20'], m.env);
+    const r = reglobal(['--compare', '--json', '--from', '20'], m.env);
     assert.equal(r.code, 1);
     const out = JSON.parse(r.stdout);
     assert.equal(out.error.code, 'NOT_FOUND');
@@ -260,13 +260,13 @@ describe('finding the old version', () => {
 
   test('--from that is neither a version nor a path exits 1', () => {
     const m = machine();
-    const r = reglobal(['--list', '--from', 'latest'], m.env);
+    const r = reglobal(['--compare', '--from', 'latest'], m.env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /not a version/);
   });
 
   test('no versions at all exits 1', () => {
-    const r = reglobal(['--list'], machine().env);
+    const r = reglobal(['--compare'], machine().env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /installed: none/);
   });
@@ -286,7 +286,7 @@ describe('finding the old version', () => {
     mkdirSync(path.join(m.env.N_PREFIX, 'n', 'versions', 'node', '18.4.0', LIB, 'node_modules'), { recursive: true });
     layouts.n = [null, null, null, '18.4.0'];
     for (const [manager, [, , , version]] of Object.entries(layouts)) {
-      const r = listJson(m, '--from', version);
+      const r = compareJson(m, '--from', version);
       assert.equal(r.from.manager, manager);
       assert.equal(r.from.version, version);
     }
@@ -301,8 +301,8 @@ describe('finding the old version', () => {
         : path.join(m.home, '.local', 'share', 'fnm');
     mkdirSync(path.join(fnmDefault, 'node-versions', 'v20.0.0', 'installation', LIB, 'node_modules'), { recursive: true });
     mkdirSync(path.join(m.home, '.nvm', 'versions', 'node', 'v20.1.0', LIB, 'node_modules'), { recursive: true });
-    assert.equal(listJson(m, '--from', '20.0.0').from.manager, 'fnm');
-    assert.equal(listJson(m, '--from', '20.1.0').from.manager, 'nvm');
+    assert.equal(compareJson(m, '--from', '20.0.0').from.manager, 'fnm');
+    assert.equal(compareJson(m, '--from', '20.1.0').from.manager, 'nvm');
   });
 
   test('ignores folders that are not versions, or have no node_modules', () => {
@@ -310,7 +310,7 @@ describe('finding the old version', () => {
     fnmVersion(m, '24.3.0');
     mkdirSync(path.join(m.env.FNM_DIR, 'node-versions', '.downloads'), { recursive: true });
     mkdirSync(path.join(m.env.FNM_DIR, 'node-versions', 'v25.0.0'), { recursive: true });
-    assert.equal(listJson(m).from.version, '24.3.0');
+    assert.equal(compareJson(m).from.version, '24.3.0');
   });
 
   test('--from <path> takes an install folder or a node_modules folder', () => {
@@ -318,30 +318,30 @@ describe('finding the old version', () => {
     const install = path.join(m.root, 'custom', 'node-v21.0.0');
     const modules = path.join(install, LIB, 'node_modules');
     pkg(modules, 'cowsay', '1.6.0');
-    const viaInstall = listJson(m, '--from', install);
+    const viaInstall = compareJson(m, '--from', install);
     assert.equal(viaInstall.from.dir, modules);
     assert.equal(viaInstall.from.manager, null);
-    assert.equal(listJson(m, '--from', modules).packages[0].name, 'cowsay');
+    assert.equal(compareJson(m, '--from', modules).packages[0].name, 'cowsay');
   });
 
   test('--from <path> reads the version from a parent folder', () => {
     const m = machine();
     const modules = fnmVersion(m, '23.4.5');
-    assert.equal(listJson(m, '--from', modules).from.version, '23.4.5');
+    assert.equal(compareJson(m, '--from', modules).from.version, '23.4.5');
     const plain = path.join(m.root, 'plain', 'node_modules');
     mkdirSync(plain, { recursive: true });
-    assert.equal(listJson(m, '--from', plain).from.version, null);
+    assert.equal(compareJson(m, '--from', plain).from.version, null);
   });
 
   test('--from <path> with no node_modules exits 1', () => {
     const m = machine();
-    const r = reglobal(['--list', '--from', path.join(m.root, 'nothing')], m.env);
+    const r = reglobal(['--compare', '--from', path.join(m.root, 'nothing')], m.env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /no global node_modules folder/);
   });
 });
 
-describe('--list', () => {
+describe('--compare', () => {
   test('sorts old globals into install, present and skipped', () => {
     const m = machine();
     const old = fnmVersion(m, '24.3.0');
@@ -351,9 +351,9 @@ describe('--list', () => {
     pkg(old, 'npm', '10.0.0');
     pkg(old, 'corepack', '0.30.0');
     pkg(m.current, 'cowsay', '1.7.0');
-    const r = listJson(m);
+    const r = compareJson(m);
     assert.equal(r.schemaVersion, 1);
-    assert.equal(r.command, 'list');
+    assert.equal(r.command, 'compare');
     assert.equal(r.to.version, process.versions.node);
     assert.equal(r.to.dir, m.current);
     const p = byName(r);
@@ -375,7 +375,7 @@ describe('--list', () => {
     pkg(old, 'npm', '10.0.0');
     pkg(old, 'cowsay', '1.6.0');
     pkg(m.current, 'cowsay', '1.7.0');
-    const r = reglobal(['--list'], m.env);
+    const r = reglobal(['--compare'], m.env);
     assert.equal(r.code, 0);
     assert.match(r.stdout, /^From Node 24\.3\.0 \(fnm\) {2}.+node_modules\nTo {3}Node /);
     assert.match(r.stdout, /to install +typescript +5\.4\.0/);
@@ -388,7 +388,7 @@ describe('--list', () => {
   test('says so when the old version has no globals', () => {
     const m = machine();
     fnmVersion(m, '24.3.0');
-    const r = reglobal(['--list'], m.env);
+    const r = reglobal(['--compare'], m.env);
     assert.match(r.stdout, /no global packages/);
   });
 
@@ -398,9 +398,9 @@ describe('--list', () => {
     pkg(old, 'typescript', '5.4.0');
     const snapshot = () => [old, m.current].map((d) => readdirSync(d, { recursive: true }).sort());
     const before = snapshot();
-    listJson(m);
+    compareJson(m);
     assert.deepEqual(snapshot(), before);
-    assert.equal(listJson(m).summary.install, 1);
+    assert.equal(compareJson(m).summary.install, 1);
   });
 
   test('npm link symlinks are reported, not installed', () => {
@@ -408,11 +408,11 @@ describe('--list', () => {
     const old = fnmVersion(m, '24.3.0');
     const target = pkg(path.join(m.root, 'src'), 'my-tool', '0.1.0');
     symlinkSync(target, path.join(old, 'my-tool'), 'junction');
-    const r = listJson(m);
+    const r = compareJson(m);
     assert.equal(r.packages[0].status, 'linked');
     assert.equal(r.summary.linked, 1);
     assert.match(r.warnings[0], /my-tool is an npm link/);
-    const text = reglobal(['--list'], m.env);
+    const text = reglobal(['--compare'], m.env);
     assert.match(text.stdout, /linked +my-tool +0\.1\.0 +\(npm link to .+\)/);
     assert.match(text.stderr, /^WARNING: my-tool is an npm link/);
   });
@@ -421,7 +421,7 @@ describe('--list', () => {
     const m = machine();
     const old = fnmVersion(m, '24.3.0');
     mkdirSync(path.join(old, 'half-gone'));
-    const r = listJson(m);
+    const r = compareJson(m);
     assert.equal(r.packages[0].status, 'broken');
     assert.match(r.warnings[0], /half-gone has no readable package.json/);
   });
@@ -433,7 +433,7 @@ describe('--list', () => {
     pkg(old, 'from-file', '1.0.0', { _resolved: 'file:../from-file-1.0.0.tgz' });
     pkg(old, 'from-url', '1.0.0', { _resolved: 'https://example.com/from-url.tgz' });
     pkg(old, 'from-registry', '1.0.0', { _resolved: 'https://registry.npmjs.org/from-registry/-/from-registry-1.0.0.tgz' });
-    const p = byName(listJson(m));
+    const p = byName(compareJson(m));
     assert.equal(p['from-git'].source, 'git');
     assert.equal(p['from-git'].resolved, 'git+ssh://git@github.com/someone/from-git.git#abc123');
     assert.equal(p['from-file'].source, 'file');
@@ -441,7 +441,7 @@ describe('--list', () => {
     assert.equal(p['from-url'].source, 'url');
     assert.equal(p['from-registry'].source, 'registry');
     assert.equal(p['from-registry'].resolved, undefined);
-    const text = reglobal(['--list'], m.env);
+    const text = reglobal(['--compare'], m.env);
     assert.match(text.stdout, /from-git +1\.0\.0 +\(from git: git\+ssh/);
     assert.match(text.stderr, /from-git is reinstalled from git/);
     assert.match(text.stderr, /from-file was installed from a file .+ Install it again by hand/);
@@ -461,7 +461,7 @@ describe('--list', () => {
         },
       }),
     );
-    const p = byName(listJson(m));
+    const p = byName(compareJson(m));
     assert.equal(p['from-git'].source, 'git');
     assert.equal(p.linked.status, 'linked');
     // npm keeps it relative to the folder holding node_modules; reglobal makes it absolute.
@@ -626,16 +626,16 @@ describe('latest versions', () => {
     return { m, old };
   }
 
-  test('--list shows what @latest is, and flags major updates', () => {
+  test('--compare shows what @latest is, and flags major updates', () => {
     const { m } = setup();
-    const p = byName(listJson(m));
+    const p = byName(compareJson(m));
     assert.equal(p.typescript.latest, '5.9.3');
     assert.equal(p.typescript.majorUpdate, false);
     assert.equal(p['@scope/tool'].latest, '3.0.0');
     assert.equal(p['@scope/tool'].majorUpdate, true);
     assert.equal(p['zero-dot'].majorUpdate, true, '0.5 -> 0.7 can break too');
     assert.equal(p['not-on-registry'].latest, null);
-    const text = reglobal(['--list'], m.env);
+    const text = reglobal(['--compare'], m.env);
     assert.match(text.stdout, /to install +typescript +5\.4\.0 -> 5\.9\.3\n/);
     assert.match(text.stdout, /@scope\/tool +2\.0\.0 -> 3\.0\.0 \(major\)/);
     assert.match(text.stdout, /to install +not-on-registry +1\.0\.0\n/);
@@ -651,18 +651,18 @@ describe('latest versions', () => {
     const m = machine();
     const old = fnmVersion(m, '24.3.0');
     pkg(old, 'offline-probe', '1.0.0');
-    const r = listJson(m, '--offline');
+    const r = compareJson(m, '--offline');
     assert.equal('latest' in r.packages[0], false);
     listJsonInstall(m, ['--dry-run', '--keep-versions']);
     assert.equal(registryAsked().includes('offline-probe'), false);
-    listJson(m);
+    compareJson(m);
     assert.equal(registryAsked().includes('offline-probe'), true);
   });
 
   test('a registry that cannot be reached is a warning, not an error', () => {
     const { m } = setup();
     m.env.npm_config_registry = 'http://127.0.0.1:9/';
-    const r = listJson(m);
+    const r = compareJson(m);
     assert.equal(r.packages[0].latest, null);
     assert.match(r.warnings.at(-1), /could not get the latest versions from http:\/\/127\.0\.0\.1:9\/: pass --offline/);
   });
@@ -856,23 +856,23 @@ describe('colour', () => {
   test('FORCE_COLOR turns on colour and symbols', () => {
     const m = setup();
     m.env.FORCE_COLOR = '1';
-    const r = reglobal(['--list'], m.env);
+    const r = reglobal(['--compare'], m.env);
     assert.ok(r.stdout.includes(`${ESC}[32mto install${ESC}[39m`), r.stdout);
     assert.ok(r.stdout.includes(`2.0.0${ESC}[22m → ${ESC}[32m3.0.0${ESC}[39m ${ESC}[33m(major)`), r.stdout);
   });
 
   test('NO_COLOR wins over FORCE_COLOR, and a pipe gets plain text', () => {
     const m = setup();
-    assert.equal(reglobal(['--list'], m.env).stdout.includes(ESC), false);
+    assert.equal(reglobal(['--compare'], m.env).stdout.includes(ESC), false);
     m.env.FORCE_COLOR = '1';
     m.env.NO_COLOR = '1';
-    assert.equal(reglobal(['--list'], m.env).stdout.includes(ESC), false);
+    assert.equal(reglobal(['--compare'], m.env).stdout.includes(ESC), false);
   });
 
   test('--json never has colour', () => {
     const m = setup();
     m.env.FORCE_COLOR = '1';
-    assert.equal(reglobal(['--list', '--json'], m.env).stdout.includes(ESC), false);
+    assert.equal(reglobal(['--compare', '--json'], m.env).stdout.includes(ESC), false);
   });
 });
 
@@ -898,7 +898,7 @@ describe('reglobal <old> <new>', () => {
     assert.deepEqual(out.json.to, { version: '26.1.0', manager: 'fnm', dir: target });
     assert.deepEqual(out.json.installed, ['pnpm', 'typescript']);
     assert.deepEqual(calls()[0].slice(3), ['pnpm@latest', 'typescript@latest']);
-    assert.equal(listJson(m, '24', '26').summary.present, 2, 'they are in 26.1.0 now');
+    assert.equal(compareJson(m, '24', '26').summary.present, 2, 'they are in 26.1.0 now');
   });
 
   test("hands npm the new version's prefix, whatever npx passed down", () => {
@@ -909,36 +909,36 @@ describe('reglobal <old> <new>', () => {
     assert.ok(readdirSync(path.join(prefix, LIB, 'node_modules')).includes('typescript'));
   });
 
-  test('one version installs into the Node in use, and --list takes them too', () => {
+  test('one version installs into the Node in use, and --compare takes them too', () => {
     const { m } = setup();
-    const r = listJson(m, '24');
+    const r = compareJson(m, '24');
     assert.equal(r.from.version, '24.3.0');
     assert.equal(r.to.dir, m.current);
     assert.equal(r.to.version, process.versions.node);
     assert.equal(r.to.manager, null, "the prefix here is not one of fnm's versions");
-    assert.equal(listJson(m, '24', '26').to.version, '26.1.0');
+    assert.equal(compareJson(m, '24', '26').to.version, '26.1.0');
     m.env.NPM_CONFIG_PREFIX = prefixOfModules(fnmVersion(m, '26.1.0'));
-    assert.equal(listJson(m, '24').to.manager, 'fnm', "the Node in use is fnm's 26.1.0");
+    assert.equal(compareJson(m, '24').to.manager, 'fnm', "the Node in use is fnm's 26.1.0");
   });
 
   test('with only the new version given, the old one is the newest other', () => {
     const { m } = setup();
     fnmVersion(m, '22.0.0');
-    const r = listJson(m, '--to', '26');
+    const r = compareJson(m, '--to', '26');
     assert.equal(r.from.version, '24.3.0');
     assert.equal(r.to.version, '26.1.0');
   });
 
   test('the old version is never the new one', () => {
     const { m } = setup();
-    const r = reglobal(['26', '26', '--list'], m.env);
+    const r = reglobal(['26', '26', '--compare'], m.env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /no installed Node 26 other than the one installed into/);
   });
 
   test('a new version that is not installed, or has no node, exits 1', () => {
     const { m } = setup();
-    assert.match(reglobal(['24', '27', '--list'], m.env).stderr, /no installed Node 27 to install into/);
+    assert.match(reglobal(['24', '27', '--compare'], m.env).stderr, /no installed Node 27 to install into/);
     fnmVersion(m, '25.0.0');
     const out = listJsonInstall(m, ['24', '25', '--dry-run']);
     assert.equal(out.json.error.code, 'NO_NODE');
@@ -1073,21 +1073,21 @@ describe('import', () => {
     );
   });
 
-  test('--keep-versions, --skip and --list work as usual', () => {
+  test('--keep-versions, --skip and --compare work as usual', () => {
     const { m, file, calls } = setup(BASIC);
     assert.equal(reglobal(['import', file, '--yes', '--keep-versions', '--skip', 'cowsay'], m.env).code, 0);
     assert.deepEqual(calls()[0].slice(3), ['typescript@5.4.0']);
-    const listed = listJsonInstall(m, ['import', file, '--list']);
-    assert.equal(listed.json.command, 'list');
+    const listed = listJsonInstall(m, ['import', file, '--compare']);
+    assert.equal(listed.json.command, 'compare');
     assert.equal(byName(listed.json).typescript.status, 'present');
   });
 
   test('imports into another version', () => {
     const { m, file } = setup(BASIC);
     withNode(fnmVersion(m, '26.1.0'));
-    const out = listJsonInstall(m, ['import', file, '26', '--list']);
+    const out = listJsonInstall(m, ['import', file, '26', '--compare']);
     assert.equal(out.json.to.version, '26.1.0');
-    assert.equal(listJsonInstall(m, ['import', file, '--to', '26', '--list']).json.to.version, '26.1.0');
+    assert.equal(listJsonInstall(m, ['import', file, '--to', '26', '--compare']).json.to.version, '26.1.0');
   });
 
   test('works the source out again, and warns about git and links', () => {
@@ -1175,7 +1175,7 @@ describe('export and import: hardening', () => {
       Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(json, 'utf16le').swap16()]),
     ]) {
       writeFileSync(file, bytes);
-      const out = listJsonInstall(m, ['import', file, '--list']);
+      const out = listJsonInstall(m, ['import', file, '--compare']);
       assert.equal(out.code, 0, out.stdout);
       assert.equal(out.json.packages[0].name, 'typescript');
     }
@@ -1187,7 +1187,7 @@ describe('export and import: hardening', () => {
     const file = exportFile(m, [{ name: 'my-tool', status: 'linked', link: `/src/my-tool${ESC}[2K${ESC}[1A` }], {
       from: { version: `22${ESC}[2J`, manager: `nvm\u009b2J` },
     });
-    const r = reglobal(['import', file, '--list'], m.env);
+    const r = reglobal(['import', file, '--compare'], m.env);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout.includes(ESC) || r.stderr.includes(ESC) || r.stdout.includes('\u009b'), false);
     assert.match(r.stderr, /my-tool is an npm link to \/src\/my-tool\[2K\[1A/);
@@ -1200,7 +1200,7 @@ describe('export and import: hardening', () => {
   test('a missing or bad schemaVersion is not called "newer"', () => {
     const m = machine();
     for (const schemaVersion of [undefined, 0, 1.5, '1']) {
-      const out = listJsonInstall(m, ['import', exportFile(m, ONE, { schemaVersion }), '--list']);
+      const out = listJsonInstall(m, ['import', exportFile(m, ONE, { schemaVersion }), '--compare']);
       assert.match(out.json.error.message, /has no valid schemaVersion/, String(schemaVersion));
     }
   });
@@ -1237,5 +1237,146 @@ describe('export and import: hardening', () => {
     const out = listJsonInstall(m, ['export', link]);
     assert.equal(out.json.error.code, 'FILE_EXISTS');
     assert.throws(() => readFileSync(target), /ENOENT/);
+  });
+});
+
+describe('--list', () => {
+  function listOne(m, args = []) {
+    const r = reglobal(['--list', '--json', ...args], m.env);
+    assert.equal(r.code, 0, r.stderr || r.stdout);
+    return JSON.parse(r.stdout);
+  }
+
+  test("shows the Node in use's globals, and nothing from other versions", () => {
+    const m = machine();
+    pkg(fnmVersion(m, '24.3.0'), 'cowsay', '1.6.0');
+    pkg(m.current, 'typescript', '5.4.0');
+    pkg(m.current, 'npm', '10.0.0');
+    const r = listOne(m);
+    assert.equal(r.schemaVersion, 1);
+    assert.equal(r.command, 'list');
+    assert.equal(r.node.version, process.versions.node);
+    assert.equal(r.node.dir, m.current);
+    assert.deepEqual(
+      r.packages.map((p) => p.name),
+      ['npm', 'typescript'],
+    );
+    assert.equal(byName(r).npm.status, 'bundled');
+    assert.equal(byName(r).typescript.source, 'registry');
+    assert.deepEqual(r.summary, { packages: 2, bundled: 1, linked: 0, broken: 0 });
+  });
+
+  test('--list 24 (or --from 24) shows Node 24', () => {
+    const m = machine();
+    pkg(fnmVersion(m, '24.3.0'), 'cowsay', '1.6.0');
+    pkg(m.current, 'typescript', '5.4.0');
+    for (const args of [['24'], ['--from', '24'], ['24.3.0']]) {
+      const r = listOne(m, args);
+      assert.equal(r.node.version, '24.3.0', args.join(' '));
+      assert.equal(r.node.manager, 'fnm');
+      assert.deepEqual(
+        r.packages.map((p) => p.name),
+        ['cowsay'],
+      );
+    }
+  });
+
+  test('prints a readable list without --json, with links, git and broken folders noted', () => {
+    const m = machine();
+    const dir = fnmVersion(m, '24.3.0');
+    pkg(dir, 'typescript', '5.4.0');
+    pkg(dir, 'corepack', '0.30.0');
+    pkg(dir, 'from-git', '1.0.0', { _resolved: 'git+https://github.com/someone/from-git.git#abc' });
+    mkdirSync(path.join(dir, 'half-gone'));
+    symlinkSync(pkg(path.join(m.root, 'src'), 'my-tool', '0.1.0'), path.join(dir, 'my-tool'), 'junction');
+    const r = reglobal(['--list', '24'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^Node 24\.3\.0 \(fnm\) {2}.+node_modules\n\n/);
+    assert.match(r.stdout, /\n {2}typescript +5\.4\.0\n/);
+    assert.match(r.stdout, /corepack +0\.30\.0 +\(comes with Node\)/);
+    assert.match(r.stdout, /from-git +1\.0\.0 +\(from git: git\+https/);
+    assert.match(r.stdout, /half-gone +\(no package\.json\)/);
+    assert.match(r.stdout, /my-tool +0\.1\.0 +\(npm link to .+\)/);
+    assert.match(r.stdout, /\n5 packages\n$/);
+    assert.equal(r.stderr, '');
+  });
+
+  test('says so when there are no globals', () => {
+    const m = machine();
+    const r = reglobal(['--list'], m.env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /no global packages\n\n0 packages\n$/);
+  });
+
+  test('never asks the registry, and changes nothing', () => {
+    const m = machine();
+    pkg(m.current, 'typescript', '5.4.0');
+    const asked = registryAsked().length;
+    const before = readdirSync(m.current, { recursive: true }).sort();
+    listOne(m);
+    assert.equal(registryAsked().length, asked);
+    assert.deepEqual(readdirSync(m.current, { recursive: true }).sort(), before);
+  });
+
+  test('two versions, or --to, point to --compare', () => {
+    const m = machine();
+    fnmVersion(m, '24.3.0');
+    fnmVersion(m, '26.1.0');
+    const two = reglobal(['--list', '24', '26'], m.env);
+    assert.equal(two.code, 1);
+    assert.match(two.stderr, /--list shows one version: to compare two, use --compare 24 26/);
+    assert.match(reglobal(['--list', '--to', '26'], m.env).stderr, /use --compare <old> 26/);
+  });
+
+  test('bad options exit 1', () => {
+    const m = machine();
+    const cases = [
+      [['--list', '--compare'], /--list and --compare do not go together/],
+      [['--list', '--yes'], /--yes does not go with --list, which installs nothing/],
+      [['--list', '--skip', 'x'], /--skip does not go with --list/],
+      [['--list', '--offline'], /--offline does not go with --list/],
+      [['--list', '27'], /no installed Node 27/],
+      [['export', '--list'], /--list does not go with export/],
+      [['export', '--compare'], /--compare does not go with export/],
+    ];
+    for (const [args, message] of cases) {
+      const r = reglobal(args, m.env);
+      assert.equal(r.code, 1, args.join(' '));
+      assert.match(r.stderr, message, args.join(' '));
+    }
+  });
+
+  test('import <file> --list shows the file alone', () => {
+    const m = machine();
+    fnmVersion(m, '26.1.0');
+    pkg(m.current, 'typescript', '5.4.0');
+    const file = path.join(m.root, 'globals.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: 'reglobal-export',
+        from: { version: '22.1.0', manager: 'nvm' },
+        packages: [
+          { name: 'typescript', version: '5.4.0', source: 'registry' },
+          { name: 'my-tool', version: '0.1.0', status: 'linked', link: '/src/my-tool' },
+        ],
+      }),
+    );
+    const r = listOne(m, ['import', file]);
+    assert.deepEqual(r.node, { version: '22.1.0', manager: 'nvm', dir: null, file });
+    assert.deepEqual(
+      r.packages.map((p) => [p.name, p.status]),
+      [
+        ['my-tool', 'linked'],
+        ['typescript', undefined],
+      ],
+    );
+    const text = reglobal(['import', file, '--list'], m.env);
+    assert.match(text.stdout, /^globals\.json \(Node 22\.1\.0 \(nvm\)\) {2}.+globals\.json\n/);
+    assert.match(text.stdout, /my-tool +0\.1\.0 +\(npm link to \/src\/my-tool\)/);
+    const into = reglobal(['import', file, '26', '--list'], m.env);
+    assert.equal(into.code, 1);
+    assert.match(into.stderr, /--list shows the file alone: to compare it with Node 26, use import .+globals\.json --compare 26/);
   });
 });

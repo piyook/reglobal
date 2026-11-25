@@ -63,7 +63,7 @@ npx reglobal import globals.json 26        # or into Node 26
 
 `export` writes a small JSON file of names, versions and where each package came from. With no file name, it prints to the screen. It won't overwrite a file that's already there unless you add `--yes`. `npm link` folders are kept in the file, with their local path, so import can warn about them.
 
-`import` works exactly like `reglobal <old> <new>`, with the file as the old version. It shows the list and asks first, and takes the same options. Packages already installed are left alone, so it's safe to run again. It checks the file before using it: every name must be a valid npm package name, and anything not from the registry is flagged.
+`import` works exactly like `reglobal <old> <new>`, with the file as the old version. It shows the list and asks first, and takes the same options. `import globals.json --list` shows what's in the file, and `--compare` compares it with the Node it would install into. Packages already installed are left alone, so it's safe to run again. It checks the file before using it: every name must be a valid npm package name, and anything not from the registry is flagged.
 
 ### Why npx
 
@@ -73,7 +73,8 @@ Use `npx reglobal` rather than installing it. A global install of reglobal belon
 
 | Option | What it does |
 | --- | --- |
-| `--list` | Show what the old version has and the new one hasn't. Installs nothing. |
+| `--list [<v>]` | Show the global packages of one version: the Node in use, or `--list 24`. Installs nothing. |
+| `--compare` | Show what the old version has and the new one hasn't: `--compare 24 26`. Installs nothing. |
 | `--dry-run` | Show the list and the npm command it would run. Installs nothing. |
 | `-i`, `--interactive` | Tick and untick packages in a checklist (arrow keys, space, enter) before installing. |
 | `--skip <names>` | Leave these packages out: `--skip eslint,pnpm`. |
@@ -96,7 +97,7 @@ Use `npx reglobal` rather than installing it. A global install of reglobal belon
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Done (or a list or dry run was shown). |
+| `0` | Done (or a list, comparison or dry run was shown). |
 | `1` | Error: no such version, npm failed, or `--yes` was needed. |
 | `2` | Nothing to install. |
 | `3` | Cancelled. |
