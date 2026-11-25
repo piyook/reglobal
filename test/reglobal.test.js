@@ -1315,6 +1315,73 @@ describe('export and import: hardening', () => {
   });
 });
 
+describe('review fixes', () => {
+  // A Node folder that is not a manager's and has no version in its path,
+  // with its node_modules straight under it: <prefix>/node_modules.
+  function plainNode(m) {
+    const prefix = path.join(m.root, 'plain');
+    const modules = path.join(prefix, 'node_modules');
+    mkdirSync(modules, { recursive: true });
+    const node = WIN ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
+    mkdirSync(path.dirname(node), { recursive: true });
+    copyFileSync(process.execPath, node);
+    return { prefix, modules };
+  }
+
+  test('a <prefix>/node_modules folder finds the node in <prefix>, and the question names the folder', () => {
+    const m = machine();
+    pkg(fnmVersion(m, '24.3.0'), 'typescript', '5.4.0');
+    const { prefix, modules } = plainNode(m);
+    const r = reglobal(['--compare', '24', modules, '--json', '--offline'], m.env);
+    assert.equal(r.code, 0, r.stdout);
+    assert.equal(JSON.parse(r.stdout).to.version, null);
+    const asked = reglobal(['24', modules, '--offline'], { ...m.env, REGLOBAL_ASSUME_TTY: '1' }, 'n\n');
+    assert.equal(asked.code, 3, asked.stderr);
+    assert.ok(asked.stderr.includes(`Install 1 package into the Node in ${prefix}?`), asked.stderr);
+    assert.equal(asked.stderr.includes('Node null'), false);
+  });
+
+  test('a registry tarball from another registry than npm uses now is a warning', () => {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'moved-a', '1.0.0', { _resolved: 'https://other.example/moved-a/-/moved-a-1.0.0.tgz' });
+    pkg(old, 'moved-b', '1.0.0', { _resolved: 'https://other.example/moved-b/-/moved-b-1.0.0.tgz' });
+    pkg(old, 'same', '1.0.0', { _resolved: `${m.env.npm_config_registry}same/-/same-1.0.0.tgz` });
+    const r = compareJson(m, '--offline');
+    assert.equal(byName(r)['moved-a'].source, 'registry');
+    assert.equal(byName(r)['moved-a'].resolved, undefined, 'the tarball stays out of the JSON');
+    assert.deepEqual(r.warnings, [
+      `moved-a, moved-b were installed from https://other.example, but npm will install from ${new URL(m.env.npm_config_registry).origin}: check it is the same package there.`,
+    ]);
+  });
+
+  test('a GitHub Packages tarball is a registry package, installed at @latest', () => {
+    const m = machine();
+    pkg(fnmVersion(m, '24.3.0'), '@someone/tool', '1.0.0', { _resolved: 'https://npm.pkg.github.com/download/@someone/tool/1.0.0/abc123' });
+    m.env['npm_config_@someone:registry'] = 'https://npm.pkg.github.com/';
+    const out = listJsonInstall(m, ['--dry-run', '--offline']);
+    assert.equal(out.json.plan[0].source, 'registry');
+    assert.equal(out.json.plan[0].spec, '@someone/tool@latest');
+    assert.deepEqual(out.json.warnings, []);
+  });
+
+  test('importing reglobal.js does not run the CLI', () => {
+    const m = machine();
+    const script = path.join(m.root, 'uses-reglobal.mjs');
+    writeFileSync(script, `const { main } = await import(${JSON.stringify(new URL('../reglobal.js', import.meta.url).href)});\nconsole.log(typeof main);\n`);
+    const r = spawnSync(process.execPath, [script, '--help'], { encoding: 'utf8', env: m.env });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'function\n');
+  });
+
+  test('--help lists -h and -v with the other options', () => {
+    assert.match(
+      reglobal(['--help']).stdout,
+      / {2}--json +print JSON on stdout\n {2}-h, --help +show this help\n {2}-v, --version +print the version\n\nAt the question/,
+    );
+  });
+});
+
 describe('--list', () => {
   function listOne(m, args = []) {
     const r = reglobal(['--list', '--json', ...args], m.env);

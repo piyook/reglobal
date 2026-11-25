@@ -1,0 +1,19 @@
+version: 2
+updates:
+    # The workflow's actions are pinned to commit SHAs: this keeps them current.
+    - package-ecosystem: github-actions
+      directory: /
+      schedule:
+          interval: weekly
+      commit-message:
+          prefix: chore
+    # Dev dependencies only: reglobal itself has none.
+    - package-ecosystem: npm
+      directory: /
+      schedule:
+          interval: weekly
+      commit-message:
+          prefix: chore
+      groups:
+          dev-dependencies:
+              dependency-type: development

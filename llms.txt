@@ -31,6 +31,8 @@ Versions are found by reading folders, never by running the old Node or npm: fnm
 
 Installing is one `npm install --global -- <specs>` run by the current Node with its own npm (`npm-cli.js` next to `node`, or the first on PATH), never through a shell. `REGLOBAL_NPM_CLI=<path to npm-cli.js>` picks another.
 
+Environment variables for reglobal's own tests: `REGLOBAL_NPM_CLI` (above), and `REGLOBAL_ASSUME_TTY=1`, which lets the question be answered through a pipe as if it were a terminal. Agents should not set `REGLOBAL_ASSUME_TTY`: use `--yes` after showing the user the plan.
+
 ## Export and import
 
 For another machine or manager, or when the old version is gone:
@@ -101,7 +103,7 @@ Import treats the file as untrusted. Each `name` must be a valid npm package nam
 
 - `latest` and `majorUpdate`: only on registry packages to install, and not with `--offline` or `--keep-versions`. `majorUpdate` is true when `latest` is a newer major version (or, below 1.0, a newer minor).
 - `status`: `install` (missing here), `excluded` (left out with `--skip`, `--only`, `e` or the checklist), `present` (already here; `currentVersion` is this one's), `skipped` (npm and corepack come with Node), `linked` (an `npm link`: never installed), `manual` (installed from a local file: install it again by hand), `broken` (no readable package.json).
-- `source`: `registry`, `git`, `file` or `url`; anything but `registry` also has `resolved`. Taken from npm's `node_modules/.package-lock.json` or the package's `_resolved`, and `registry` when neither says.
+- `source`: `registry`, `git`, `file` or `url`; anything but `registry` also has `resolved`. Taken from npm's `node_modules/.package-lock.json` or the package's `_resolved`, and `registry` when neither says. A tarball in npm's layout (`.../-/name-1.0.0.tgz`) or from GitHub Packages counts as `registry`: it is installed by name from the registry npm uses now, and when that is not the registry it came from, there is a warning ("... was installed from X, but npm will install from Y").
 - `from.manager` and `from.version` are `null` when `--from` was a path they can't be read from.
 
 Installing (`--dry-run --json`, `--yes --json`) prints the same fields, with `"command": "install"` and:

@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
 import { parseArgs, stripVTControlCharacters } from 'node:util';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
@@ -58,10 +59,10 @@ Options:
   --list           show one version's globals, or a file's (read-only)
   --compare        show the old version's globals next to the new one's (read-only)
   --json           print JSON on stdout
-
-At the question, answer e to type the names of packages to leave out.
   -h, --help       show this help
   -v, --version    print the version
+
+At the question, answer e to type the names of packages to leave out.
 
 Finds versions installed by fnm, nvm, nvm-windows, mise, asdf and n.
 
@@ -139,9 +140,8 @@ function findVersions(env = process.env) {
       const parsed = parseVersion(entry.name);
       if (!parsed || !entry.isDirectory()) continue;
       const dir = firstExisting(modules.map((m) => path.join(root, entry.name, m)));
-      if (!dir) continue;
-      const real = realpathSync(dir);
-      if (seen.has(real)) continue;
+      const real = dir && realOrNull(dir);
+      if (!real || seen.has(real)) continue;
       seen.add(real);
       found.push({ version: parsed.join('.'), manager, dir, parsed });
     }
@@ -159,12 +159,19 @@ function currentGlobalDir(env = process.env) {
   return process.platform === 'win32' ? path.join(bin, 'node_modules') : path.join(bin, '..', 'lib', 'node_modules');
 }
 
-function sameDir(a, b) {
+// A folder that can't be read (EACCES) or went away mid-scan is skipped,
+// not a crash.
+function realOrNull(p) {
   try {
-    return realpathSync(a) === realpathSync(b);
+    return realpathSync(p);
   } catch {
-    return false;
+    return null;
   }
+}
+
+function sameDir(a, b) {
+  const ra = realOrNull(a);
+  return ra !== null && ra === realOrNull(b);
 }
 
 function fromPath(p) {
@@ -218,9 +225,12 @@ function resolveFrom(from, versions, target) {
   return match;
 }
 
-// Where a Node install keeps node, from its global node_modules folder.
+// The npm prefix of a global node_modules folder, from its layout:
+// <prefix>/lib/node_modules (POSIX) or <prefix>/node_modules (Windows, and
+// some POSIX folders given as a path).
 function prefixOf(dir) {
-  return process.platform === 'win32' ? path.dirname(dir) : path.dirname(path.dirname(dir));
+  const parent = path.dirname(dir);
+  return path.basename(parent) === 'lib' ? path.dirname(parent) : parent;
 }
 
 function nodeIn(prefix) {
@@ -274,9 +284,15 @@ function sourceOf(resolved) {
   if (!resolved) return 'registry';
   if (/^(git\+|git:|github:|gitlab:|bitbucket:)/.test(resolved)) return 'git';
   if (/^https?:\/\/.+\/-\/[^/]+\.tgz$/.test(resolved)) return 'registry';
+  // GitHub Packages serves its tarballs from /download/, not npm's /-/.
+  if (/^https:\/\/npm\.pkg\.github\.com\/download\//.test(resolved)) return 'registry';
   if (/^https?:/.test(resolved)) return 'url';
   return 'file';
 }
+
+// The registry tarball a package was installed from. A symbol key, so it is
+// copied with the package but stays out of the JSON.
+const TARBALL = Symbol('tarball');
 
 function packageDirs(dir) {
   const out = [];
@@ -294,7 +310,15 @@ function readPackage(dir, name, lock) {
   const pkg = readJson(path.join(full, 'package.json'));
   const locked = lock?.packages?.[`node_modules/${name}`] ?? {};
   const info = { name, version: pkg?.version ?? locked.version ?? null };
-  if (lstatSync(full).isSymbolicLink() || locked.link) {
+  let stat;
+  try {
+    stat = lstatSync(full);
+  } catch {
+    // Gone since the folder was listed, or not readable.
+    info.status = 'broken';
+    return info;
+  }
+  if (stat.isSymbolicLink() || locked.link) {
     info.status = 'linked';
     // Always absolute, so the path still means something in an export: the
     // lockfile's is relative to the folder holding node_modules, and a
@@ -309,6 +333,7 @@ function readPackage(dir, name, lock) {
   const resolved = locked.resolved ?? pkg._resolved ?? null;
   info.source = sourceOf(resolved);
   if (info.source !== 'registry') info.resolved = resolved;
+  else if (resolved) info[TARBALL] = resolved;
   return info;
 }
 
@@ -429,6 +454,8 @@ function row(p, widths, s) {
 }
 
 const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
+// The Node installed into, for a sentence: a folder given as a path may not say its version.
+const targetName = (t) => (t.version ? `Node ${t.version}` : `the Node in ${prefixOf(t.dir)}`);
 // "Node 24.3.0 (fnm)", or "globals.json (Node 22.1.0 (nvm))" for an export file.
 const sideName = (v) => (v.file ? `${path.basename(v.file)} (${nodeName(v)})` : nodeName(v));
 
@@ -520,14 +547,29 @@ function registryFinder(env, target) {
   };
 }
 
+// A few lookups at a time, so a long list doesn't open dozens of connections.
+const LOOKUPS_AT_ONCE = 8;
+
+async function mapLimit(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 // Look up what @latest is for each registry package to install. Each name is
 // sent only to the registry npm would install it from, and never with a token.
-async function addLatest(r, env, target) {
+async function addLatest(r, registryFor) {
   const targets = r.packages.filter((p) => p.status === 'install' && p.source === 'registry');
   if (!targets.length) return;
-  const registryFor = registryFinder(env, target);
   const registries = targets.map((p) => registryFor(p.name));
-  const found = await Promise.all(targets.map((p, i) => latestVersion(registries[i], p.name)));
+  const found = await mapLimit(targets, LOOKUPS_AT_ONCE, (p, i) => latestVersion(registries[i], p.name));
   targets.forEach((p, i) => {
     p.latest = found[i];
     p.majorUpdate = isMajorUpdate(p.version, found[i]);
@@ -535,6 +577,34 @@ async function addLatest(r, env, target) {
   if (found.every((v) => v === null)) {
     r.warnings.push(`could not get the latest versions from ${[...new Set(registries)].join(', ')}: pass --offline to skip the lookup`);
   }
+}
+
+const originOf = (url) => {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+};
+
+// npm installs a registry package by name, from the registry it is set up
+// for now. When the old one came from another registry, that may be another
+// package with the same name: say so, one warning per registry.
+function movedRegistry(packages, registryFor) {
+  const moved = new Map();
+  for (const p of packages) {
+    if (p.status !== 'install' || p.source !== 'registry' || !p[TARBALL]) continue;
+    const was = originOf(p[TARBALL]);
+    const now = originOf(registryFor(p.name));
+    if (!was || was === now) continue;
+    const key = `${was} ${now}`;
+    if (!moved.has(key)) moved.set(key, { was, now, names: [] });
+    moved.get(key).names.push(p.name);
+  }
+  return [...moved.values()].map(
+    ({ was, now, names }) =>
+      `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} installed from ${was}, but npm will install from ${now}: check it is the same package there.`,
+  );
 }
 
 // The old side: an export file, or an installed version's globals.
@@ -558,7 +628,9 @@ async function comparison(opts, env = process.env) {
     summary: summarize(packages),
     warnings: warningsFor(packages),
   };
-  if (!opts.offline && !opts['keep-versions']) await addLatest(r, env, target);
+  const registryFor = registryFinder(env, target);
+  r.warnings.push(...movedRegistry(packages, registryFor));
+  if (!opts.offline && !opts['keep-versions']) await addLatest(r, registryFor);
   // Not enumerable, so it stays out of the JSON: install needs the node to run.
   Object.defineProperty(r, 'target', { value: target });
   return r;
@@ -794,11 +866,12 @@ function findNpmCli(target, env) {
     if (!existsSync(env.REGLOBAL_NPM_CLI)) throw new UsageError('NO_NPM', `REGLOBAL_NPM_CLI is set to ${env.REGLOBAL_NPM_CLI}, which does not exist`);
     return env.REGLOBAL_NPM_CLI;
   }
-  const pathDirs = (env.PATH || env.Path || '').split(path.delimiter).filter(Boolean);
+  // A relative PATH entry (`.`) would find an npm in whatever folder reglobal runs in.
+  const pathDirs = (env.PATH || env.Path || '').split(path.delimiter).filter((d) => d && path.isAbsolute(d));
   const candidates = target.current ? [path.dirname(process.execPath), ...pathDirs].map(npmCliIn) : [path.join(target.dir, 'npm', 'bin', 'npm-cli.js')];
   const cli = firstExisting(candidates);
   if (!cli)
-    throw new UsageError('NO_NPM', target.current ? 'npm was not found next to this Node or on PATH' : `Node ${target.version} has no npm in ${target.dir}`);
+    throw new UsageError('NO_NPM', target.current ? 'npm was not found next to this Node or on PATH' : `${targetName(target)} has no npm in ${target.dir}`);
   return cli;
 }
 
@@ -876,7 +949,9 @@ function applyFilters(r, opts) {
 
 // One readline for every question, so typed-ahead answers aren't lost.
 function prompter() {
-  const rl = createInterface({ input: process.stdin, terminal: Boolean(process.stdin.isTTY) });
+  // In a terminal readline reads keys itself and echoes them to `output`:
+  // without one, the answer wouldn't show as it's typed. stderr keeps stdout clean.
+  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: Boolean(process.stdin.isTTY) });
   const lines = rl[Symbol.asyncIterator]();
   return {
     async ask(question) {
@@ -894,7 +969,7 @@ async function confirm(r) {
   try {
     for (;;) {
       const s = ERR;
-      const question = `Install ${plural(r.plan.length, 'package')} into Node ${r.to.version}?`;
+      const question = `Install ${plural(r.plan.length, 'package')} into ${targetName(r.to)}?`;
       const answer = (await p.ask(`\n${s.cyan(s.ask)}${s.bold(question)} ${s.dim('[y/N, e to leave some out]')} `)) ?? '';
       if (/^y(es)?$/i.test(answer)) return true;
       if (!/^e(dit)?$/i.test(answer)) return false;
@@ -911,6 +986,16 @@ async function confirm(r) {
   } finally {
     p.close();
   }
+}
+
+// The rows a line takes on a terminal `columns` wide.
+const screenRows = (line, columns) => (columns ? Math.max(1, Math.ceil(visible(line) / columns)) : 1);
+
+// The [first, end) items that fit in `room` rows, keeping the cursor in view.
+function itemWindow(count, cursor, room) {
+  if (count <= room) return [0, count];
+  const first = Math.min(Math.max(0, cursor - Math.floor(room / 2)), count - room);
+  return [first, first + room];
 }
 
 // The arrow-key checklist for -i. It draws on stderr and redraws in place.
@@ -933,14 +1018,18 @@ function checklist(items) {
   const draw = () => {
     if (drawn) out.write(`\x1b[${drawn}A\x1b[0J`);
     const ticked = on.filter(Boolean).length;
+    // Room for the items: the screen less the blank line, title, footer and one spare.
+    const [first, end] = itemWindow(items.length, cursor, Math.max(3, (out.rows || Number.POSITIVE_INFINITY) - 4));
+    const range = first > 0 || end < items.length ? `${first + 1}-${end} of ${items.length} shown · ` : '';
     const lines = [
       `\n${s.cyan(s.ask)}${s.bold('Choose what to install')}  ${s.dim(keyHelp)}`,
-      ...items.map(line),
-      s.dim(`  ${ticked} of ${items.length} ticked`),
+      ...items.slice(first, end).map((p, k) => line(p, first + k)),
+      s.dim(`  ${range}${ticked} of ${items.length} ticked`),
     ];
     const text = lines.join('\n');
     out.write(`${text}\n`);
-    drawn = text.split('\n').length;
+    // Count rows on screen, not lines: a line wider than the terminal wraps.
+    drawn = text.split('\n').reduce((n, l) => n + screenRows(l, out.columns), 0);
   };
   const keys = {
     up: () => {
@@ -1052,7 +1141,7 @@ async function install(opts, json, env = process.env) {
   r.installed = r.plan.filter((p) => after.has(p.name)).map((p) => p.name);
   r.failed = r.plan.filter((p) => !after.has(p.name)).map((p) => p.name);
   if (r.npmExitCode === 0 && !r.failed.length) {
-    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Installed ${plural(r.installed.length, 'package')} into Node ${r.to.version}.`)}`);
+    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Installed ${plural(r.installed.length, 'package')} into ${targetName(r.to)}.`)}`);
     return report(0);
   }
   const message = `npm exited with ${r.npmExitCode}; not installed: ${r.failed.join(', ') || 'none'}`;
@@ -1175,4 +1264,19 @@ export async function main(argv) {
   }
 }
 
-process.exitCode = await main(process.argv);
+// Run only as the CLI, so a test or tool can import main without running it.
+// import.meta.main says so on newer Node. Otherwise the real paths are
+// compared, since npm's bin links and npx reach this file through symlinks or
+// shims (case-blind on Windows). When the script can't be found (`node
+// reglobal`, no .js), it runs, as it always did.
+function isEntryPoint() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main;
+  const real = (p) => {
+    const r = realOrNull(p);
+    return r && (process.platform === 'win32' ? r.toLowerCase() : r);
+  };
+  const script = process.argv[1] && real(path.resolve(process.argv[1]));
+  return !script || script === real(fileURLToPath(import.meta.url));
+}
+
+if (isEntryPoint()) process.exitCode = await main(process.argv);
