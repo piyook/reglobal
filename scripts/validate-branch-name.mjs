@@ -7,7 +7,8 @@ import { execSync } from 'node:child_process';
 const args = process.argv.slice(2);
 const branchNames = args.length ? args : [process.env.GITHUB_HEAD_REF || execSync('git rev-parse --abbrev-ref HEAD').toString().trim()];
 
-const invalid = branchNames.filter((name) => !/^(main|dev)$|^(feat|fix|hotfix|release|chore)\/.+$/.test(name));
+// dependabot/... is Dependabot's own naming, which it can't be told to change.
+const invalid = branchNames.filter((name) => !/^(main|dev)$|^(feat|fix|hotfix|release|chore|dependabot)\/.+$/.test(name));
 
 if (invalid.length) {
   for (const name of invalid) {
