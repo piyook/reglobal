@@ -10,7 +10,7 @@ description: Reinstall the global npm packages from an older Node version into t
 3. Show the user the `plan`: each package with its old `version` and the `latest` it will get (at `@latest` unless `--keep-versions`). Point out every `"majorUpdate": true`, since a new major version can break things, and every entry in `warnings`: npm links and packages from a local file are not reinstalled, and git packages come back from git. Ask which, if any, to leave out.
 4. Run the same command with `--yes` in place of `--dry-run`, adding `--skip a,b` for the ones left out (or `--only a,b`). Report `installed`, and `failed` if it isn't empty. Never pipe `y` into the prompt, and don't use `-i`: it's a checklist for a person at a terminal.
 
-For a new machine, or when the old version is gone: `reglobal export globals.json` on the old one (add `--yes` only if the user agrees to overwrite an existing file), then `reglobal import globals.json --dry-run --json` and steps 3 and 4 on the new one.
+For a new machine, or when the old version is gone: `reglobal export globals.json` on the old one (add `--yes` only if the user agrees to overwrite an existing file), then `reglobal import globals.json --dry-run --json` and steps 3 and 4 on the new one. Only import a file the user made or trusts: installing runs each package's install scripts. Never skip the preview for an import.
 
 If it exits 1 with `NO_OLD_VERSION` or `NOT_FOUND`, the message lists the versions it found; for another manager, pass `--from <path to that version's folder>`. `reglobal --compare 24 26 --json` is the read-only comparison, and `reglobal --list 24 --json` lists one version's globals.
 

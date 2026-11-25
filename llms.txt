@@ -20,7 +20,7 @@ Do not pipe `y` into the prompt: use `--yes`. Without `--yes`, with `--json` or 
 - `--keep-versions`: install the versions the old Node had (`typescript@5.4.0`), and git packages at the same commit. Default: `@latest`, and the latest commit.
 - `--skip <names>`: leave these out. `--only <names>`: install just these. Comma or space separated, or repeat the option. Each name must be one of the packages to install, or reglobal exits 1 (`BAD_NAME`) and installs nothing. They don't go together.
 - `-i`, `--interactive`: a checklist at the terminal (up/down, space, `a` for all or none, enter, `q` to cancel). Not with `--json` or `--yes`.
-- `--offline`: don't look up the latest versions. By default, each registry package to install is looked up at `<registry>/<name>/latest` (the registry is `npm_config_registry`, or registry.npmjs.org). Only the package name is sent, never a token. If the lookup fails, `latest` is `null` and there is a warning: not an error.
+- `--offline`: don't look up the latest versions. By default, each registry package to install is looked up at `<registry>/<name>/latest`, on the registry npm would install it from: a scope's own registry (`@company:registry=...`) for a scoped name, otherwise `registry`, from `npm_config_*` variables, the user's `.npmrc`, then the global npmrc of the Node installed into (registry.npmjs.org if none). Only the package name is sent, never a token, so a private registry usually answers with an error and `latest` is `null`. If the lookup fails, `latest` is `null` and there is a warning: not an error.
 - `--compare`: compare the old version's globals with the new one's, read-only. Takes `<old>`, `<new>`, `--from`, `--to` and `--offline`, not the install options. (Before 0.2.0 this was `--list`.)
 - `--list [<version|path>]` (or `--from`): one version's globals, read-only: the Node in use, or the one given (any installed version, including the one in use). Never asks the registry. With two versions or `--to` it exits 1 and points to `--compare`. Not with `--compare`, `--offline` or the install options.
 
@@ -54,7 +54,9 @@ The file:
 }
 ```
 
-Import treats the file as untrusted. Each `name` must be a valid npm package name, or it exits 1 with `BAD_FILE` and installs nothing. A `version` that isn't plain version text is dropped (it gets `@latest`), and `source` is worked out again from `resolved`, not taken from the file. A file that isn't a reglobal export, isn't JSON, or has a newer `schemaVersion` also exits 1 with `BAD_FILE`.
+Only import files the user trusts: installing a package runs its install scripts, and its commands go on PATH. Always preview with `--dry-run --json` and show the user the `plan` before `--yes`, and point out every source that is not `registry`.
+
+Import treats the file as untrusted. Each `name` must be a valid npm package name, or it exits 1 with `BAD_FILE` and installs nothing. A git or tarball source must be `https:`, `git+https:`, `git+ssh:` or a `github:`/`gitlab:`/`bitbucket:` shorthand, with no host or user starting with `-`; anything else (`http:`, `git:`, `git+file:`, ...) exits 1 with `BAD_FILE`. A `version` that isn't plain version text is dropped (it gets `@latest`), and `source` is worked out again from `resolved`, not taken from the file. A file that isn't a reglobal export, isn't JSON, or has a newer `schemaVersion` also exits 1 with `BAD_FILE`.
 
 ## JSON
 

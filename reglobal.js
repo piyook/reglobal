@@ -473,18 +473,68 @@ async function latestVersion(registry, name) {
   }
 }
 
-// Look up what @latest is for each registry package to install. Only public
-// package names are sent, never a token. npm_config_registry picks the registry.
-async function addLatest(r, env) {
+// key=value lines of an npmrc file, with ${VAR} filled in from the
+// environment as npm does. A missing or unreadable file has none.
+function npmrcValues(file, env) {
+  let text;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return {};
+  }
+  const out = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    const eq = line.indexOf('=');
+    if (eq < 1 || line.startsWith(';') || line.startsWith('#')) continue;
+    const value = line
+      .slice(eq + 1)
+      .trim()
+      .replace(/^(['"])(.*)\1$/, '$2')
+      .replace(/\$\{([^}]+)\}/g, (_, name) => env[name] ?? '');
+    out[line.slice(0, eq).trim().toLowerCase()] = value;
+  }
+  return out;
+}
+
+const DEFAULT_REGISTRY = 'https://registry.npmjs.org/';
+
+// The registry npm would install each package from, read as npm reads its
+// config for a global install: npm_config_* variables, then the user's
+// .npmrc, then the global npmrc of the Node installed into (npm ignores a
+// project .npmrc with --global). A scope with its own registry
+// (@company:registry=...) uses that one, so a private name never goes to the
+// public registry.
+function registryFinder(env, target) {
+  const setting = (name) => env[`npm_config_${name}`] || env[`NPM_CONFIG_${name.toUpperCase()}`];
+  const userconfig = setting('userconfig') || path.join(os.homedir(), '.npmrc');
+  const globalconfig = setting('globalconfig') || path.join(prefixOf(target.dir), 'etc', 'npmrc');
+  const config = { ...npmrcValues(globalconfig, env), ...npmrcValues(userconfig, env) };
+  for (const [k, v] of Object.entries(env)) {
+    const m = /^npm_config_(.+)$/i.exec(k);
+    if (m && v) config[m[1].toLowerCase()] = v;
+  }
+  return (name) => {
+    const scope = name.startsWith('@') ? name.slice(0, name.indexOf('/')).toLowerCase() : null;
+    return (scope && config[`${scope}:registry`]) || config.registry || DEFAULT_REGISTRY;
+  };
+}
+
+// Look up what @latest is for each registry package to install. Each name is
+// sent only to the registry npm would install it from, and never with a token.
+async function addLatest(r, env, target) {
   const targets = r.packages.filter((p) => p.status === 'install' && p.source === 'registry');
   if (!targets.length) return;
-  const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/';
-  const found = await Promise.all(targets.map((p) => latestVersion(registry, p.name)));
+  const registryFor = registryFinder(env, target);
+  const registries = targets.map((p) => registryFor(p.name));
+  const found = await Promise.all(targets.map((p, i) => latestVersion(registries[i], p.name)));
   targets.forEach((p, i) => {
     p.latest = found[i];
     p.majorUpdate = isMajorUpdate(p.version, found[i]);
   });
-  if (found.every((v) => v === null)) r.warnings.push(`could not get the latest versions from ${registry}: pass --offline to skip the lookup`);
+  if (found.every((v) => v === null)) {
+    r.warnings.push(`could not get the latest versions from ${[...new Set(registries)].join(', ')}: pass --offline to skip the lookup`);
+  }
 }
 
 // The old side: an export file, or an installed version's globals.
@@ -508,7 +558,7 @@ async function comparison(opts, env = process.env) {
     summary: summarize(packages),
     warnings: warningsFor(packages),
   };
-  if (!opts.offline && !opts['keep-versions']) await addLatest(r, env);
+  if (!opts.offline && !opts['keep-versions']) await addLatest(r, env, target);
   // Not enumerable, so it stays out of the JSON: install needs the node to run.
   Object.defineProperty(r, 'target', { value: target });
   return r;
@@ -643,6 +693,24 @@ const isControl = (ch) => {
 const hasControl = (s) => [...s].some(isControl);
 const stripControl = (s) => [...s].filter((ch) => !isControl(ch)).join('');
 
+// The git and tarball sources an import may hand to npm: https and git over
+// https or ssh, or a github:/gitlab:/bitbucket: shorthand. Plain http and
+// git:// can be changed on the way, and a host starting with - could be read
+// by git or ssh as an option.
+const SAFE_PROTOCOLS = new Set(['https:', 'git+https:', 'git+ssh:']);
+const SHORTHAND = /^(github|gitlab|bitbucket):[\w.~][\w.~-]*\/[\w.~-]+(#[\w./~-]+)?$/;
+
+function safeSource(resolved) {
+  if (SHORTHAND.test(resolved)) return true;
+  if (/\s/.test(resolved)) return false;
+  try {
+    const url = new URL(resolved);
+    return SAFE_PROTOCOLS.has(url.protocol) && Boolean(url.hostname) && !url.hostname.startsWith('-') && !url.username.startsWith('-');
+  } catch {
+    return false;
+  }
+}
+
 // An export file could come from anywhere: keep only what reglobal itself
 // would have written, and work out each source again from `resolved`.
 function importEntry(e, i, file) {
@@ -653,6 +721,12 @@ function importEntry(e, i, file) {
   // A URL is handed to npm, so a bad one is refused rather than tidied up.
   if (resolved && hasControl(resolved)) throw badFile(file, `has control characters in the source of ${e.name}`);
   const source = sourceOf(resolved);
+  if ((source === 'git' || source === 'url') && !safeSource(resolved)) {
+    throw badFile(
+      file,
+      `has a source for ${e.name} that reglobal will not install: ${resolved} (allowed: https, git+https, git+ssh, github:, gitlab:, bitbucket:)`,
+    );
+  }
   return { name: e.name, version, source, ...(source === 'registry' ? {} : { resolved }) };
 }
 
