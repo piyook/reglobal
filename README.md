@@ -23,8 +23,8 @@ It reads the old version's global packages straight from its folder, shows you w
 - Shows the version each package moves to, and flags new major versions.
 - Leave packages out with a checklist (`-i`), a flag (`--skip`) or at the question.
 - The old Node and npm never run, so it works even when they're broken.
+- `export` and `import` move the list through a file, to another machine or another version manager.
 - Made for agents too: `--json` output, `--dry-run`, `--yes`, and clear exit codes.
-- Coming: `export` and `import`, to move the list between machines.
 
 No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 
@@ -50,6 +50,20 @@ reglobal always shows the list and asks before installing anything:
 ```
 
 `y` installs, `e` lets you type the names of packages to leave out, and anything else cancels.
+
+### Export and import
+
+Moving to a new machine, or a different version manager? Save the list on the old one and install from it on the new one:
+
+```sh
+npx reglobal export globals.json           # the Node you're using (or --from 24)
+npx reglobal import globals.json           # on the new machine: into the Node in use
+npx reglobal import globals.json 26        # or into Node 26
+```
+
+`export` writes a small JSON file of names, versions and where each package came from. With no file name, it prints to the screen. It won't overwrite a file that's already there unless you add `--yes`. `npm link` folders are kept in the file, with their local path, so import can warn about them.
+
+`import` works exactly like `reglobal <old> <new>`, with the file as the old version. It shows the list and asks first, and takes the same options. Packages already installed are left alone, so it's safe to run again. It checks the file before using it: every name must be a valid npm package name, and anything not from the registry is flagged.
 
 ### Why npx
 

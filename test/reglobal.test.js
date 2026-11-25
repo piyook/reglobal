@@ -102,6 +102,20 @@ function fnmVersion(m, v) {
 }
 
 // `input` is typed into reglobal's stdin (with REGLOBAL_ASSUME_TTY to answer prompts).
+// Give a fake version's folder a real node (a hard link to this one, or a copy),
+// so reglobal can run "its" npm. Returns the version's prefix.
+function withNode(modules) {
+  const prefix = LIB ? path.dirname(path.dirname(modules)) : path.dirname(modules);
+  const node = WIN ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
+  mkdirSync(path.dirname(node), { recursive: true });
+  try {
+    linkSync(process.execPath, node);
+  } catch {
+    copyFileSync(process.execPath, node);
+  }
+  return prefix;
+}
+
 function reglobal(args, env = baseEnv, input = '') {
   const r = spawnSync(process.execPath, [REGLOBAL, ...args], { encoding: 'utf8', env, input });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
@@ -866,14 +880,7 @@ describe('reglobal <old> <new>', () => {
     pkg(old, 'typescript', '5.4.0');
     pkg(old, 'pnpm', '9.0.0');
     const target = fnmVersion(m, '26.1.0');
-    const prefix = LIB ? path.dirname(path.dirname(target)) : path.dirname(target);
-    const node = WIN ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
-    mkdirSync(path.dirname(node), { recursive: true });
-    try {
-      linkSync(process.execPath, node);
-    } catch {
-      copyFileSync(process.execPath, node);
-    }
+    const prefix = withNode(target);
     const calls = withFakeNpm(m);
     return { m, target, prefix, calls };
   }
@@ -903,7 +910,10 @@ describe('reglobal <old> <new>', () => {
     assert.equal(r.from.version, '24.3.0');
     assert.equal(r.to.dir, m.current);
     assert.equal(r.to.version, process.versions.node);
+    assert.equal(r.to.manager, null, "the prefix here is not one of fnm's versions");
     assert.equal(listJson(m, '24', '26').to.version, '26.1.0');
+    m.env.NPM_CONFIG_PREFIX = path.dirname(LIB ? path.dirname(fnmVersion(m, '26.1.0')) : fnmVersion(m, '26.1.0'));
+    assert.equal(listJson(m, '24').to.manager, 'fnm', "the Node in use is fnm's 26.1.0");
   });
 
   test('with only the new version given, the old one is the newest other', () => {
@@ -944,5 +954,200 @@ describe('reglobal <old> <new>', () => {
     assert.match(reglobal(['24', '--from', '22'], m.env).stderr, /give the old version once: 24 or --from 22/);
     assert.match(reglobal(['24', 'latest'], m.env).stderr, /unknown command latest/);
     assert.match(reglobal(['24', '26', '--to', '25'], m.env).stderr, /give the new version once: 26 or --to 25/);
+  });
+});
+
+describe('export', () => {
+  function setup() {
+    const m = machine();
+    pkg(m.current, 'typescript', '5.4.0');
+    pkg(m.current, '@scope/tool', '2.0.0');
+    pkg(m.current, 'from-git', '1.0.0', { _resolved: 'git+https://github.com/someone/from-git.git#abc' });
+    pkg(m.current, 'npm', '10.0.0');
+    mkdirSync(path.join(m.current, 'half-gone'));
+    return m;
+  }
+
+  test('writes the globals of the Node in use, without npm or broken folders', () => {
+    const m = setup();
+    const file = path.join(m.root, 'globals.json');
+    const r = reglobal(['export', file], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /Exported 3 packages from Node .+ to .+globals\.json/);
+    const data = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(data.kind, 'reglobal-export');
+    assert.equal(data.schemaVersion, 1);
+    assert.equal(data.from.version, process.versions.node);
+    assert.match(data.exportedAt, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual(data.packages, [
+      { name: '@scope/tool', version: '2.0.0', source: 'registry' },
+      { name: 'from-git', version: '1.0.0', source: 'git', resolved: 'git+https://github.com/someone/from-git.git#abc' },
+      { name: 'typescript', version: '5.4.0', source: 'registry' },
+    ]);
+  });
+
+  test('with no file, prints the export on stdout', () => {
+    const m = setup();
+    const r = reglobal(['export'], m.env);
+    assert.equal(r.code, 0);
+    assert.equal(JSON.parse(r.stdout).packages.length, 3);
+  });
+
+  test('--from exports another version, and keeps npm links', () => {
+    const m = setup();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'pnpm', '9.0.0');
+    const target = pkg(path.join(m.root, 'src'), 'my-tool', '0.1.0');
+    symlinkSync(target, path.join(old, 'my-tool'), 'junction');
+    const data = JSON.parse(reglobal(['export', '--from', '24'], m.env).stdout);
+    assert.deepEqual(data.from, { version: '24.3.0', manager: 'fnm' });
+    assert.deepEqual(
+      data.packages.map((p) => [p.name, p.status ?? p.source]),
+      [
+        ['my-tool', 'linked'],
+        ['pnpm', 'registry'],
+      ],
+    );
+  });
+
+  test('will not overwrite a file without --yes', () => {
+    const m = setup();
+    const file = path.join(m.root, 'package.json');
+    writeFileSync(file, '{"precious":true}');
+    const r = listJsonInstall(m, ['export', file]);
+    assert.equal(r.code, 1);
+    assert.equal(r.json.error.code, 'FILE_EXISTS');
+    assert.equal(readFileSync(file, 'utf8'), '{"precious":true}');
+    const forced = listJsonInstall(m, ['export', file, '--yes']);
+    assert.equal(forced.code, 0);
+    assert.equal(forced.json.command, 'export');
+    assert.equal(forced.json.packages, 3);
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).kind, 'reglobal-export');
+  });
+
+  test('bad arguments exit 1', () => {
+    const m = setup();
+    assert.match(reglobal(['export', 'a.json', 'b.json'], m.env).stderr, /export takes one file/);
+    assert.match(reglobal(['export', '--dry-run'], m.env).stderr, /--dry-run does not go with export/);
+    assert.match(reglobal(['export', '--from', '19'], m.env).stderr, /no installed Node 19/);
+  });
+});
+
+describe('import', () => {
+  // An export file, as another machine would have written it.
+  function setup(packages, extra = {}) {
+    const m = machine();
+    const file = path.join(m.root, 'globals.json');
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, kind: 'reglobal-export', from: { version: '22.1.0', manager: 'nvm' }, packages, ...extra }));
+    const calls = withFakeNpm(m);
+    return { m, file, calls };
+  }
+  const BASIC = [
+    { name: 'typescript', version: '5.4.0', source: 'registry' },
+    { name: 'cowsay', version: '1.6.0', source: 'registry' },
+    { name: 'npm', version: '10.0.0', source: 'registry' },
+  ];
+
+  test('installs from the file into the Node in use', () => {
+    const { m, file, calls } = setup(BASIC);
+    pkg(m.current, 'cowsay', '1.7.0');
+    const r = reglobal(['import', file, '--yes'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^From globals\.json \(Node 22\.1\.0 \(nvm\)\) +.+globals\.json/);
+    assert.deepEqual(calls()[0].slice(3), ['typescript@latest']);
+  });
+
+  test('--dry-run --json shows the file as the old side', () => {
+    const { file } = setup(BASIC);
+    const out = listJsonInstall(setup(BASIC).m, ['import', file, '--dry-run']);
+    assert.equal(out.code, 0, out.stderr);
+    assert.deepEqual(out.json.from, { version: '22.1.0', manager: 'nvm', dir: null, file });
+    assert.deepEqual(
+      out.json.plan.map((p) => p.spec),
+      ['cowsay@latest', 'typescript@latest'],
+    );
+  });
+
+  test('--keep-versions, --skip and --list work as usual', () => {
+    const { m, file, calls } = setup(BASIC);
+    assert.equal(reglobal(['import', file, '--yes', '--keep-versions', '--skip', 'cowsay'], m.env).code, 0);
+    assert.deepEqual(calls()[0].slice(3), ['typescript@5.4.0']);
+    const listed = listJsonInstall(m, ['import', file, '--list']);
+    assert.equal(listed.json.command, 'list');
+    assert.equal(byName(listed.json).typescript.status, 'present');
+  });
+
+  test('imports into another version', () => {
+    const { m, file } = setup(BASIC);
+    withNode(fnmVersion(m, '26.1.0'));
+    const out = listJsonInstall(m, ['import', file, '26', '--list']);
+    assert.equal(out.json.to.version, '26.1.0');
+    assert.equal(listJsonInstall(m, ['import', file, '--to', '26', '--list']).json.to.version, '26.1.0');
+  });
+
+  test('works the source out again, and warns about git and links', () => {
+    const { m, file } = setup([
+      { name: 'sneaky', version: '1.0.0', source: 'registry', resolved: 'git+https://example.com/sneaky.git#abc' },
+      { name: 'my-tool', version: '0.1.0', status: 'linked', link: '/home/someone/src/my-tool' },
+      { name: 'local', version: '1.0.0', resolved: 'file:../local-1.0.0.tgz' },
+    ]);
+    const out = listJsonInstall(m, ['import', file, '--dry-run']);
+    const p = byName(out.json);
+    assert.equal(p.sneaky.source, 'git', 'the file said registry, but the URL is git');
+    assert.equal(p['my-tool'].status, 'linked');
+    assert.equal(p.local.status, 'manual');
+    assert.deepEqual(
+      out.json.plan.map((x) => x.spec),
+      ['git+https://example.com/sneaky.git'],
+    );
+    assert.match(out.json.warnings.join('\n'), /sneaky is reinstalled from git/);
+  });
+
+  test('a version that is not a plain version is dropped, not passed to npm', () => {
+    const { m, file } = setup([{ name: 'typescript', version: '5.4.0 --registry=http://evil', source: 'registry' }]);
+    const out = listJsonInstall(m, ['import', file, '--dry-run', '--keep-versions']);
+    assert.equal(out.json.plan[0].spec, 'typescript@latest');
+  });
+
+  test('a file that is missing, not JSON, not an export or too new exits 1', () => {
+    const { m, file } = setup(BASIC);
+    const err = (args) => listJsonInstall(m, args).json.error;
+    assert.equal(err(['import', path.join(m.root, 'nope.json'), '--dry-run']).code, 'NOT_FOUND');
+    writeFileSync(file, 'not json');
+    assert.match(err(['import', file, '--dry-run']).message, /is not a JSON file/);
+    writeFileSync(file, '{"packages":[]}');
+    assert.match(err(['import', file, '--dry-run']).message, /is not a reglobal export/);
+    writeFileSync(file, JSON.stringify({ schemaVersion: 2, kind: 'reglobal-export', packages: [] }));
+    assert.match(err(['import', file, '--dry-run']).message, /made by a newer reglobal/);
+  });
+
+  test('a bad package name exits 1, so it never reaches npm', () => {
+    for (const name of ['--global-style', '../escape', 'a b', '']) {
+      const { m, file, calls } = setup([{ name, version: '1.0.0' }]);
+      const out = listJsonInstall(m, ['import', file, '--yes']);
+      assert.equal(out.code, 1, name);
+      assert.equal(out.json.error.code, 'BAD_FILE');
+      assert.deepEqual(calls(), []);
+    }
+  });
+
+  test('bad arguments exit 1', () => {
+    const { m, file } = setup(BASIC);
+    assert.match(reglobal(['import'], m.env).stderr, /import needs a file/);
+    assert.match(reglobal(['import', file, '--from', '24'], m.env).stderr, /--from does not go with import/);
+    assert.match(reglobal(['import', file, '26', '22'], m.env).stderr, /too many arguments/);
+  });
+
+  test('round trip: export on one machine, import on another', () => {
+    const a = machine();
+    pkg(a.current, 'typescript', '5.4.0');
+    pkg(a.current, 'pnpm', '9.0.0');
+    const file = path.join(a.root, 'globals.json');
+    assert.equal(reglobal(['export', file], a.env).code, 0);
+    const b = machine();
+    const calls = withFakeNpm(b);
+    assert.equal(reglobal(['import', file, '--yes', '--keep-versions'], b.env).code, 0);
+    assert.deepEqual(calls()[0].slice(3), ['pnpm@9.0.0', 'typescript@5.4.0']);
+    assert.equal(reglobal(['import', file, '--yes'], b.env).code, 2, 'run again: nothing left to install');
   });
 });
