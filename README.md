@@ -32,6 +32,26 @@ npm install -g reglobal
 
 Or run it without installing: `npx reglobal`.
 
+## See what would move
+
+```sh
+reglobal --list            # the newest other installed version vs this one
+reglobal --list --from 24  # or name the old version (24, 24.1, 24.1.0, or a folder)
+```
+
+```text
+From Node 24.3.0 (fnm): ~/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules
+To   Node 26.1.0: ~/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules
+
+  to install  typescript 5.4.0
+  installed   cowsay 1.6.0 (here: 1.7.0)
+  skipped     npm 10.0.0 (comes with Node)
+
+1 to install, 1 already here, 1 skipped.
+```
+
+It only reads folders: the old Node and npm never run, so it works even when they're broken. Add `--json` for output a script or agent can read (see [llms.txt](llms.txt)).
+
 ## License
 
 MIT
