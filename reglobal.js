@@ -220,8 +220,6 @@ function nodeIn(prefix) {
   return process.platform === 'win32' ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
 }
 
-// The Node to install into: the one asked for, or the one running reglobal.
-// `node` is that version's own node, which runs its own npm.
 // The Node in use: its version, and its manager when it is one we found.
 function currentNode(versions, env) {
   const dir = currentGlobalDir(env);
@@ -229,6 +227,8 @@ function currentNode(versions, env) {
   return { version: process.versions.node, manager: known?.manager ?? null, dir };
 }
 
+// The Node to install into: the one asked for, or the one running reglobal.
+// `node` is that version's own node, which runs its own npm.
 function resolveTarget(spec, versions, env) {
   if (!spec) return { ...currentNode(versions, env), node: process.execPath, current: true };
   const found = looksLikePath(spec) ? fromPath(expandHome(spec)) : matchVersion(spec, versions, 'the new version');
@@ -289,7 +289,10 @@ function readPackage(dir, name, lock) {
   const info = { name, version: pkg?.version ?? locked.version ?? null };
   if (lstatSync(full).isSymbolicLink() || locked.link) {
     info.status = 'linked';
-    info.link = locked.resolved ?? readlinkSync(full);
+    // Always absolute, so the path still means something in an export: the
+    // lockfile's is relative to the folder holding node_modules, and a
+    // symlink's to the folder the link sits in.
+    info.link = locked.resolved ? path.resolve(path.dirname(dir), locked.resolved) : path.resolve(path.dirname(full), readlinkSync(full));
     return info;
   }
   if (!pkg) {
@@ -537,11 +540,23 @@ function exportCmd(opts, json, env = process.env) {
     return 0;
   }
   const file = path.resolve(expandHome(opts.file));
-  if (existsSync(file) && !opts.yes) throw new UsageError('FILE_EXISTS', `${file} already exists: pass --yes to overwrite it, or pick another name`);
-  writeFileSync(file, text);
+  writeExport(file, text, opts.yes);
   if (json) console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, command: 'export', file, from: data.from, packages: packages.length }, null, 2));
   else console.log(OUT.green(`${OUT.ok}Exported ${plural(packages.length, 'package')} from Node ${src.version ?? '?'} to ${file}`));
   return 0;
+}
+
+// 'wx' creates the file only if nothing is there, checked and created in one
+// step, and fails on a symlink even when it points nowhere. --yes overwrites.
+function writeExport(file, text, overwrite) {
+  try {
+    writeFileSync(file, text, { flag: overwrite ? 'w' : 'wx' });
+  } catch (err) {
+    if (err.code === 'EEXIST') throw new UsageError('FILE_EXISTS', `${file} already exists: pass --yes to overwrite it, or pick another name`);
+    if (err.code === 'ENOENT') throw new UsageError('NOT_FOUND', `the folder ${path.dirname(file)} does not exist`);
+    if (err.code === 'EISDIR') throw new UsageError('BAD_OPTION', `${file} is a folder: give a file name`);
+    throw err;
+  }
 }
 
 // npm package names: an optional @scope/, then letters, digits and - . _ ~,
@@ -553,34 +568,60 @@ function badFile(file, why) {
   return new UsageError('BAD_FILE', `${file} ${why}`);
 }
 
+// Control characters (C0, DEL and C1) in text from a file could move the
+// cursor or recolour the terminal, and hide a warning before the question.
+const isControl = (ch) => {
+  const n = ch.codePointAt(0);
+  return n < 32 || (n >= 127 && n < 160);
+};
+const hasControl = (s) => [...s].some(isControl);
+const stripControl = (s) => [...s].filter((ch) => !isControl(ch)).join('');
+
 // An export file could come from anywhere: keep only what reglobal itself
 // would have written, and work out each source again from `resolved`.
 function importEntry(e, i, file) {
   if (!e || typeof e.name !== 'string' || !PACKAGE_NAME.test(e.name)) throw badFile(file, `has no valid package name in entry ${i + 1}`);
   const version = typeof e.version === 'string' && VERSION_TEXT.test(e.version) ? e.version : null;
-  if (e.status === 'linked') return { name: e.name, version, status: 'linked', link: String(e.link ?? '?') };
+  if (e.status === 'linked') return { name: e.name, version, status: 'linked', link: stripControl(String(e.link ?? '?')) };
   const resolved = typeof e.resolved === 'string' ? e.resolved : null;
+  // A URL is handed to npm, so a bad one is refused rather than tidied up.
+  if (resolved && hasControl(resolved)) throw badFile(file, `has control characters in the source of ${e.name}`);
   const source = sourceOf(resolved);
   return { name: e.name, version, source, ...(source === 'registry' ? {} : { resolved }) };
+}
+
+// Text as Windows tools save it too: PowerShell 5.1's `>` writes UTF-16 with
+// a byte order mark, and other tools put a BOM before UTF-8.
+function decodeText(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return buf.subarray(2).toString('utf16le');
+  if (buf[0] === 0xfe && buf[1] === 0xff) return Buffer.from(buf.subarray(2)).swap16().toString('utf16le');
+  const text = buf.toString('utf8');
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+function checkSchema(data, file) {
+  if (data?.kind !== EXPORT_KIND || !Array.isArray(data.packages)) throw badFile(file, 'is not a reglobal export (make one with reglobal export <file>)');
+  const v = data.schemaVersion;
+  if (!Number.isInteger(v) || v < 1) throw badFile(file, 'has no valid schemaVersion: make it again with reglobal export <file>');
+  if (v > SCHEMA_VERSION) throw badFile(file, 'was made by a newer reglobal: update reglobal');
 }
 
 function readExport(spec) {
   const file = path.resolve(expandHome(spec));
   let data;
   try {
-    data = JSON.parse(readFileSync(file, 'utf8'));
+    data = JSON.parse(decodeText(readFileSync(file)));
   } catch (err) {
     if (err.code === 'ENOENT') throw new UsageError('NOT_FOUND', `no file ${file}`);
     throw badFile(file, 'is not a JSON file');
   }
-  if (data?.kind !== EXPORT_KIND || !Array.isArray(data.packages)) throw badFile(file, 'is not a reglobal export (make one with reglobal export <file>)');
-  if (!Number.isInteger(data.schemaVersion) || data.schemaVersion > SCHEMA_VERSION) throw badFile(file, 'was made by a newer reglobal: update reglobal');
+  checkSchema(data, file);
   const byName = new Map();
   data.packages.forEach((e, i) => {
     const p = importEntry(e, i, file);
     if (!byName.has(p.name)) byName.set(p.name, p);
   });
-  const text = (v) => (typeof v === 'string' && v.length < 40 ? v : null);
+  const text = (v) => (typeof v === 'string' && v.length < 40 ? stripControl(v) : null);
   return {
     from: { version: text(data.from?.version), manager: text(data.from?.manager), dir: null, file },
     packages: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)),
@@ -666,7 +707,8 @@ function checkNames(r, names) {
   for (const name of names) {
     if (plan.has(name)) continue;
     const pkg = r.packages.find((p) => p.name === name);
-    const why = pkg ? `its status is ${pkg.status}` : `Node ${r.from.version ?? '(old)'} has no global package by that name`;
+    const old = r.from.file ? path.basename(r.from.file) : `Node ${r.from.version ?? '(old)'}`;
+    const why = pkg ? `its status is ${pkg.status}` : `${old} has no global package by that name`;
     throw new UsageError('BAD_NAME', `${name} is not one of the packages to install: ${why}`);
   }
 }
@@ -924,6 +966,10 @@ function setTarget(values, target) {
 
 function parseExport(values, rest) {
   if (rest.length > 1) throw new UsageError('BAD_OPTION', 'export takes one file: reglobal export [<file>] [--from <version>]');
+  // `reglobal export 24` most likely means Node 24, not a file called 24.
+  if (/^v?\d+(\.\d+){0,2}$/.test(rest[0] ?? '')) {
+    throw new UsageError('BAD_OPTION', `${rest[0]} looks like a version: use --from ${rest[0]} to export it (or ./${rest[0]} for a file by that name)`);
+  }
   return Object.assign(values, { command: 'export', file: rest[0] });
 }
 

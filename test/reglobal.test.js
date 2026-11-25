@@ -102,10 +102,14 @@ function fnmVersion(m, v) {
 }
 
 // `input` is typed into reglobal's stdin (with REGLOBAL_ASSUME_TTY to answer prompts).
+// The npm prefix that holds a global node_modules: <prefix>/lib/node_modules
+// on POSIX, <prefix>/node_modules on Windows.
+const prefixOfModules = (modules) => (LIB ? path.dirname(path.dirname(modules)) : path.dirname(modules));
+
 // Give a fake version's folder a real node (a hard link to this one, or a copy),
 // so reglobal can run "its" npm. Returns the version's prefix.
 function withNode(modules) {
-  const prefix = LIB ? path.dirname(path.dirname(modules)) : path.dirname(modules);
+  const prefix = prefixOfModules(modules);
   const node = WIN ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
   mkdirSync(path.dirname(node), { recursive: true });
   try {
@@ -238,7 +242,7 @@ describe('finding the old version', () => {
   test('leaves out the version running now', () => {
     const m = machine();
     const only = fnmVersion(m, '24.3.0');
-    m.env.NPM_CONFIG_PREFIX = path.dirname(LIB ? path.dirname(only) : only);
+    m.env.NPM_CONFIG_PREFIX = prefixOfModules(only);
     const r = reglobal(['--list'], m.env);
     assert.equal(r.code, 1);
     assert.match(r.stderr, /no other Node version found \(installed: 24\.3\.0 \(fnm\)\)/);
@@ -460,7 +464,8 @@ describe('--list', () => {
     const p = byName(listJson(m));
     assert.equal(p['from-git'].source, 'git');
     assert.equal(p.linked.status, 'linked');
-    assert.equal(p.linked.link, '../../src/linked');
+    // npm keeps it relative to the folder holding node_modules; reglobal makes it absolute.
+    assert.equal(p.linked.link, path.resolve(path.dirname(old), '../../src/linked'));
   });
 });
 
@@ -912,7 +917,7 @@ describe('reglobal <old> <new>', () => {
     assert.equal(r.to.version, process.versions.node);
     assert.equal(r.to.manager, null, "the prefix here is not one of fnm's versions");
     assert.equal(listJson(m, '24', '26').to.version, '26.1.0');
-    m.env.NPM_CONFIG_PREFIX = path.dirname(LIB ? path.dirname(fnmVersion(m, '26.1.0')) : fnmVersion(m, '26.1.0'));
+    m.env.NPM_CONFIG_PREFIX = prefixOfModules(fnmVersion(m, '26.1.0'));
     assert.equal(listJson(m, '24').to.manager, 'fnm', "the Node in use is fnm's 26.1.0");
   });
 
@@ -1149,5 +1154,88 @@ describe('import', () => {
     assert.equal(reglobal(['import', file, '--yes', '--keep-versions'], b.env).code, 0);
     assert.deepEqual(calls()[0].slice(3), ['pnpm@9.0.0', 'typescript@5.4.0']);
     assert.equal(reglobal(['import', file, '--yes'], b.env).code, 2, 'run again: nothing left to install');
+  });
+});
+
+describe('export and import: hardening', () => {
+  function exportFile(m, packages, extra = {}) {
+    const file = path.join(m.root, 'globals.json');
+    writeFileSync(file, JSON.stringify({ schemaVersion: 1, kind: 'reglobal-export', from: { version: '22.1.0', manager: 'nvm' }, packages, ...extra }));
+    return file;
+  }
+  const ONE = [{ name: 'typescript', version: '5.4.0', source: 'registry' }];
+
+  test('reads exports saved with a BOM, or as UTF-16 by Windows PowerShell', () => {
+    const m = machine();
+    const json = JSON.stringify({ schemaVersion: 1, kind: 'reglobal-export', packages: ONE });
+    const file = path.join(m.root, 'g.json');
+    for (const bytes of [
+      Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(json, 'utf8')]),
+      Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(json, 'utf16le')]),
+      Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(json, 'utf16le').swap16()]),
+    ]) {
+      writeFileSync(file, bytes);
+      const out = listJsonInstall(m, ['import', file, '--list']);
+      assert.equal(out.code, 0, out.stdout);
+      assert.equal(out.json.packages[0].name, 'typescript');
+    }
+  });
+
+  test('control characters in a file never reach the terminal', () => {
+    const m = machine();
+    const ESC = '\u001b';
+    const file = exportFile(m, [{ name: 'my-tool', status: 'linked', link: `/src/my-tool${ESC}[2K${ESC}[1A` }], {
+      from: { version: `22${ESC}[2J`, manager: `nvm\u009b2J` },
+    });
+    const r = reglobal(['import', file, '--list'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout.includes(ESC) || r.stderr.includes(ESC) || r.stdout.includes('\u009b'), false);
+    assert.match(r.stderr, /my-tool is an npm link to \/src\/my-tool\[2K\[1A/);
+    const url = exportFile(m, [{ name: 'x', resolved: `git+https://example.com/x.git${ESC}[2K` }]);
+    const out = listJsonInstall(m, ['import', url, '--dry-run']);
+    assert.equal(out.json.error.code, 'BAD_FILE');
+    assert.match(out.json.error.message, /control characters in the source of x/);
+  });
+
+  test('a missing or bad schemaVersion is not called "newer"', () => {
+    const m = machine();
+    for (const schemaVersion of [undefined, 0, 1.5, '1']) {
+      const out = listJsonInstall(m, ['import', exportFile(m, ONE, { schemaVersion }), '--list']);
+      assert.match(out.json.error.message, /has no valid schemaVersion/, String(schemaVersion));
+    }
+  });
+
+  test('a --skip typo under import names the file, not a Node version', () => {
+    const m = machine();
+    const out = listJsonInstall(m, ['import', exportFile(m, ONE), '--yes', '--skip', 'typscript']);
+    assert.match(out.json.error.message, /typscript is not one of the packages to install: globals\.json has no global package by that name/);
+  });
+
+  test('export 24 asks for --from rather than writing a file called 24', () => {
+    const m = machine();
+    const r = reglobal(['export', '24'], { ...m.env });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /24 looks like a version: use --from 24 to export it \(or \.\/24 for a file by that name\)/);
+  });
+
+  test('export into a missing folder or onto a folder exits 1 with a clear message', () => {
+    const m = machine();
+    assert.match(listJsonInstall(m, ['export', path.join(m.root, 'no', 'such', 'g.json')]).json.error.message, /the folder .+ does not exist/);
+    assert.match(listJsonInstall(m, ['export', m.root, '--yes']).json.error.message, /is a folder: give a file name/);
+  });
+
+  test('export does not write through a symlink that points nowhere', (t) => {
+    const m = machine();
+    const link = path.join(m.root, 'link.json');
+    const target = path.join(m.root, 'elsewhere.json');
+    try {
+      symlinkSync(target, link, 'file');
+    } catch {
+      t.skip('this account cannot make file symlinks');
+      return;
+    }
+    const out = listJsonInstall(m, ['export', link]);
+    assert.equal(out.json.error.code, 'FILE_EXISTS');
+    assert.throws(() => readFileSync(target), /ENOENT/);
   });
 });
