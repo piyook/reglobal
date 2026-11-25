@@ -6,8 +6,8 @@ Work in progress: `export` and `import` are not built yet.
 
 ## Workflow
 
-1. Switch to the new Node version first (`fnm use 26`, `nvm use 26`, ...). reglobal installs into the Node that runs it.
-2. Preview: `reglobal --dry-run --json` (add `--from 24` to name the old version). Nothing is installed and nothing is asked.
+1. Name the two versions: `reglobal <old> <new>`, for example `reglobal 24.22.3 26.13.1` or `reglobal 24 26`. With only `<old>`, it installs into the Node in use, the one running reglobal (`node --version`).
+2. Preview: `reglobal 24 26 --dry-run --json`. Nothing is installed and nothing is asked.
 3. Show the user the `plan` and every entry in `warnings`, and get their agreement. Point out each `"majorUpdate": true`: `@latest` is a new major version there, which can break things. Ask which packages to leave out.
 4. Install: the same command with `--yes` in place of `--dry-run`, and `--skip a,b` (or `--only a,b`) for what the user left out. Check `installed` and `failed` in the JSON.
 
@@ -15,7 +15,8 @@ Do not pipe `y` into the prompt: use `--yes`. Without `--yes`, with `--json` or 
 
 ## Options
 
-- `--from <version|path>`: the old Node version. `24`, `24.1` or `24.1.0` picks the newest installed match (a leading `v` is fine). A path is that version's install folder or its global `node_modules`. Default: the newest installed version other than the one running.
+- `<old>` or `--from <version|path>`: the old Node version. `24`, `24.1` or `24.1.0` picks the newest installed match (a leading `v` is fine). A path is that version's install folder or its global `node_modules`. Default: the newest installed version other than `<new>`.
+- `<new>` or `--to <version|path>`: the Node to install into, matched the same way. Default: the Node in use. For another version, reglobal runs that version's own `node` and the `npm` in its global folder, and sets `npm_config_prefix` to that version's folder (replacing whatever npx passed down), so packages are built for and installed into that Node.
 - `--dry-run`: show the plan, install nothing.
 - `--yes` (`-y`): install without asking.
 - `--keep-versions`: install the versions the old Node had (`typescript@5.4.0`), and git packages at the same commit. Default: `@latest`, and the latest commit.
@@ -40,7 +41,7 @@ Installing is one `npm install --global -- <specs>` run by the current Node with
   "schemaVersion": 1,
   "command": "list",
   "from": { "version": "24.3.0", "manager": "fnm", "dir": "/home/me/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules" },
-  "to": { "version": "26.1.0", "dir": "/home/me/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules" },
+  "to": { "version": "26.1.0", "manager": "fnm", "dir":"/home/me/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules" },
   "packages": [
     { "name": "typescript", "version": "5.4.0", "source": "registry", "status": "install", "latest": "5.9.3", "majorUpdate": false },
     { "name": "cowsay", "version": "1.6.0", "source": "registry", "status": "present", "currentVersion": "1.7.0" },
@@ -72,7 +73,7 @@ Installing (`--dry-run --json`, `--yes --json`) prints the same fields, with `"c
 
 `npmExitCode`, `installed` and `failed` are only there after npm ran. A package counts as installed when its folder is in this Node's globals afterwards. On failure the same object also has `error`.
 
-Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_FROM`, `BAD_NAME`, `NEEDS_YES`, `NEEDS_TERMINAL`, `NO_NPM`, `INSTALL_FAILED`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`.
+Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_VERSION`, `BAD_NAME`, `NEEDS_YES`, `NEEDS_TERMINAL`, `NO_NODE`, `NO_NPM`, `INSTALL_FAILED`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`.
 
 ## Exit codes
 

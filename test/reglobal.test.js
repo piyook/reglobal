@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
@@ -129,7 +129,7 @@ import path from 'node:path';
 const args = process.argv.slice(2);
 appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(args) + '\\n');
 console.log('fake npm output');
-const modules = path.join(process.env.NPM_CONFIG_PREFIX, process.platform === 'win32' ? '' : 'lib', 'node_modules');
+const modules = path.join(process.env.npm_config_prefix, process.platform === 'win32' ? '' : 'lib', 'node_modules');
 const skip = (process.env.FAKE_NPM_SKIP || '').split(',');
 for (const spec of args.slice(args.indexOf('--') + 1)) {
   const name = spec.includes('://') ? spec.match(/\\/([^/#]+?)(?:\\.git)?(?:#.*)?$/)[1] : spec.replace(/(.)@[^@]*$/, '$1');
@@ -854,5 +854,95 @@ describe('colour', () => {
     const m = setup();
     m.env.FORCE_COLOR = '1';
     assert.equal(reglobal(['--list', '--json'], m.env).stdout.includes(ESC), false);
+  });
+});
+
+describe('reglobal <old> <new>', () => {
+  // An fnm with Node 24.3.0 (two globals) and 26.1.0, which gets a real node
+  // (a hard link to this one), so reglobal can run "its" npm.
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'typescript', '5.4.0');
+    pkg(old, 'pnpm', '9.0.0');
+    const target = fnmVersion(m, '26.1.0');
+    const prefix = LIB ? path.dirname(path.dirname(target)) : path.dirname(target);
+    const node = WIN ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
+    mkdirSync(path.dirname(node), { recursive: true });
+    try {
+      linkSync(process.execPath, node);
+    } catch {
+      copyFileSync(process.execPath, node);
+    }
+    const calls = withFakeNpm(m);
+    return { m, target, prefix, calls };
+  }
+
+  test('installs from the first version into the second', () => {
+    const { m, target, calls } = setup();
+    const out = listJsonInstall(m, ['24.3.0', '26.1.0', '--yes']);
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(out.json.from.version, '24.3.0');
+    assert.deepEqual(out.json.to, { version: '26.1.0', manager: 'fnm', dir: target });
+    assert.deepEqual(out.json.installed, ['pnpm', 'typescript']);
+    assert.deepEqual(calls()[0].slice(3), ['pnpm@latest', 'typescript@latest']);
+    assert.equal(listJson(m, '24', '26').summary.present, 2, 'they are in 26.1.0 now');
+  });
+
+  test("hands npm the new version's prefix, whatever npx passed down", () => {
+    const { m, prefix } = setup();
+    m.env.npm_config_global_prefix = path.join(m.root, 'wrong');
+    m.env.NPM_CONFIG_PREFIX = path.join(m.root, 'wrong');
+    assert.equal(reglobal(['24', '26', '--yes'], m.env).code, 0);
+    assert.ok(readdirSync(path.join(prefix, LIB, 'node_modules')).includes('typescript'));
+  });
+
+  test('one version installs into the Node in use, and --list takes them too', () => {
+    const { m } = setup();
+    const r = listJson(m, '24');
+    assert.equal(r.from.version, '24.3.0');
+    assert.equal(r.to.dir, m.current);
+    assert.equal(r.to.version, process.versions.node);
+    assert.equal(listJson(m, '24', '26').to.version, '26.1.0');
+  });
+
+  test('with only the new version given, the old one is the newest other', () => {
+    const { m } = setup();
+    fnmVersion(m, '22.0.0');
+    const r = listJson(m, '--to', '26');
+    assert.equal(r.from.version, '24.3.0');
+    assert.equal(r.to.version, '26.1.0');
+  });
+
+  test('the old version is never the new one', () => {
+    const { m } = setup();
+    const r = reglobal(['26', '26', '--list'], m.env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /no installed Node 26 other than the one installed into/);
+  });
+
+  test('a new version that is not installed, or has no node, exits 1', () => {
+    const { m } = setup();
+    assert.match(reglobal(['24', '27', '--list'], m.env).stderr, /no installed Node 27 to install into/);
+    fnmVersion(m, '25.0.0');
+    const out = listJsonInstall(m, ['24', '25', '--dry-run']);
+    assert.equal(out.json.error.code, 'NO_NODE');
+  });
+
+  test('a new version with no npm of its own exits 1', () => {
+    const { m } = setup();
+    delete m.env.REGLOBAL_NPM_CLI;
+    const out = listJsonInstall(m, ['24', '26', '--yes']);
+    assert.equal(out.code, 1);
+    assert.equal(out.json.error.code, 'NO_NPM');
+    assert.match(out.json.error.message, /Node 26\.1\.0 has no npm/);
+  });
+
+  test('bad arguments exit 1', () => {
+    const { m } = setup();
+    assert.match(reglobal(['24', '26', '22'], m.env).stderr, /too many versions: 24 26 22/);
+    assert.match(reglobal(['24', '--from', '22'], m.env).stderr, /give the old version once: 24 or --from 22/);
+    assert.match(reglobal(['24', 'latest'], m.env).stderr, /unknown command latest/);
+    assert.match(reglobal(['24', '26', '--to', '25'], m.env).stderr, /give the new version once: 26 or --to 25/);
   });
 });

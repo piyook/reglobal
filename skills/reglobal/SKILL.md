@@ -5,8 +5,8 @@ description: Reinstall the global npm packages from an older Node version into t
 
 # Moving global packages to a new Node version with reglobal
 
-1. Make sure the new Node version is the one in use (`node --version`). reglobal installs into the Node that runs it.
-2. Preview with `reglobal --dry-run --json`, or `reglobal --dry-run --json --from 24` to name the old version. Nothing is installed. Exit `2` means there is nothing to install.
+1. Find the old and new versions (the user's words, or `node --version` for the one in use). `reglobal <old> <new>` moves from one to the other; with only `<old>`, it installs into the Node in use.
+2. Preview with `reglobal 24 26 --dry-run --json`. Nothing is installed. Exit `2` means there is nothing to install.
 3. Show the user the `plan`: each package with its old `version` and the `latest` it will get (at `@latest` unless `--keep-versions`). Point out every `"majorUpdate": true`, since a new major version can break things, and every entry in `warnings`: npm links and packages from a local file are not reinstalled, and git packages come back from git. Ask which, if any, to leave out.
 4. Run the same command with `--yes` in place of `--dry-run`, adding `--skip a,b` for the ones left out (or `--only a,b`). Report `installed`, and `failed` if it isn't empty. Never pipe `y` into the prompt, and don't use `-i`: it's a checklist for a person at a terminal.
 

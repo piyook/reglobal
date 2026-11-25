@@ -12,8 +12,9 @@
 Moved to a new Node version and lost your global packages? reglobal reinstalls them in one command.
 
 ```sh
-fnm install 26 && fnm use 26
-npx reglobal --from 24
+npx reglobal 24.22.3 26.13.1   # from Node 24.22.3 into Node 26.13.1
+npx reglobal 24 26             # the same, with the newest installed 24.x and 26.x
+npx reglobal 24                # from 24 into the Node you're using now
 ```
 
 It finds the global packages you had in the old version, by reading that version's folder directly, and reinstalls them in the new one at their latest versions (or at the same versions, with `--keep-versions`).
@@ -38,9 +39,11 @@ If you'd still like it installed, `npm install -g reglobal` works too: then run 
 ## See what would move
 
 ```sh
-npx reglobal --list            # the newest other installed version vs this one
-npx reglobal --list --from 24  # or name the old version (24, 24.1, 24.1.0, or a folder)
+npx reglobal 24 26 --list      # what 24 has that 26 hasn't (read-only)
+npx reglobal --list            # the newest other installed version vs the one in use
 ```
+
+A version can be `24`, `24.1` or `24.1.0` (the newest installed match), or a version's folder. With no new version, reglobal installs into the Node in use; given one, it runs that version's own node and npm, so you don't have to switch to it first.
 
 ```text
 From Node 24.3.0 (fnm): ~/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules

@@ -17,18 +17,26 @@ import { parseArgs, stripVTControlCharacters } from 'node:util';
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
 const SCHEMA_VERSION = 1;
 
-const HELP = `Usage: reglobal [--from <version|path>] [--dry-run | --yes | -i] [--skip <names> | --only <names>]
+const HELP = `Usage: reglobal [<old> [<new>]] [--dry-run | --yes | -i] [--skip <names> | --only <names>]
                 [--keep-versions] [--offline] [--json]
-       reglobal --list [--from <version|path>] [--offline] [--json]
+       reglobal --list [<old> [<new>]] [--offline] [--json]
 
-Reinstall the global npm packages from another Node version into this one,
-the Node that runs reglobal. Asks before installing.
+Reinstall the global npm packages from an old Node version into a new one.
+Asks before installing.
+
+  reglobal 24.22.3 26.13.1   from Node 24.22.3 into Node 26.13.1
+  reglobal 24 26             the newest installed 24.x into the newest 26.x
+  reglobal 24                from the newest 24.x into the Node in use
+  reglobal                   from the newest other version into the Node in use
+
+<old> and <new> are versions (24, 24.1, 24.1.0) or a version's install folder.
+<new> defaults to the Node in use; installing into another one runs that
+version's own node and npm.
 
 Options:
-  --from <v|path>  the old Node version: 24, 24.1 or 24.1.0 picks the newest
-                   installed match; a path is that version's install folder
-                   or its global node_modules. Default: the newest installed
-                   version other than this one.
+  --from <v|path>  the same as <old>. Default: the newest installed version
+                   other than <new>.
+  --to <v|path>    the same as <new>. Default: the Node in use.
   --dry-run        show what would be installed, install nothing
   -y, --yes        install without asking (needed with --json or no terminal)
   --keep-versions  install the same versions as before, not the latest
@@ -172,24 +180,57 @@ function looksLikePath(s) {
   return /[\\/]/.test(s) || s.startsWith('.') || s.startsWith('~');
 }
 
-// Pick the old version from --from, or the newest one that isn't running now.
-function resolveFrom(from, versions, current) {
-  if (from && looksLikePath(from)) return fromPath(from.replace(/^~(?=$|[\\/])/, os.homedir()));
-  const others = versions.filter((v) => !sameDir(v.dir, current));
-  const installed = versions.length ? versions.map((v) => `${v.version} (${v.manager})`).join(', ') : 'none';
-  if (!from) {
-    if (!others.length) throw new UsageError('NO_OLD_VERSION', `no other Node version found (installed: ${installed}). Use --from <path> for another manager.`);
-    return others[0];
-  }
-  const want = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(from);
-  if (!want) throw new UsageError('BAD_FROM', `--from ${from} is not a version (24, 24.1, 24.1.0) or a path`);
+const installedList = (versions) => (versions.length ? versions.map((v) => `${v.version} (${v.manager})`).join(', ') : 'none');
+const expandHome = (p) => p.replace(/^~(?=$|[\\/])/, os.homedir());
+
+// The newest of `candidates` matching 24, 24.1 or 24.1.0 (a leading v is fine).
+function matchVersion(spec, candidates, label) {
+  const want = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(spec);
+  if (!want) throw new UsageError('BAD_VERSION', `${label} ${spec} is not a version (24, 24.1, 24.1.0) or a path`);
   const parts = want
     .slice(1)
     .filter((p) => p !== undefined)
     .map(Number);
-  const match = others.find((v) => parts.every((n, i) => v.parsed[i] === n));
-  if (!match) throw new UsageError('NOT_FOUND', `no installed Node ${from} other than this one (installed: ${installed})`);
+  return candidates.find((v) => parts.every((n, i) => v.parsed[i] === n));
+}
+
+// Pick the old version: the one asked for, or the newest one other than the target.
+function resolveFrom(from, versions, target) {
+  if (from && looksLikePath(from)) return fromPath(expandHome(from));
+  const others = versions.filter((v) => !sameDir(v.dir, target));
+  if (!from) {
+    if (!others.length)
+      throw new UsageError('NO_OLD_VERSION', `no other Node version found (installed: ${installedList(versions)}). Use --from <path> for another manager.`);
+    return others[0];
+  }
+  const match = matchVersion(from, others, 'the old version');
+  if (!match) throw new UsageError('NOT_FOUND', `no installed Node ${from} other than the one installed into (installed: ${installedList(versions)})`);
   return match;
+}
+
+// Where a Node install keeps node, from its global node_modules folder.
+function prefixOf(dir) {
+  return process.platform === 'win32' ? path.dirname(dir) : path.dirname(path.dirname(dir));
+}
+
+function nodeIn(prefix) {
+  return process.platform === 'win32' ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
+}
+
+// The Node to install into: the one asked for, or the one running reglobal.
+// `node` is that version's own node, which runs its own npm.
+function resolveTarget(spec, versions, env) {
+  if (!spec) {
+    const dir = currentGlobalDir(env);
+    return { version: process.versions.node, manager: null, dir, node: process.execPath, current: true };
+  }
+  const found = looksLikePath(spec) ? fromPath(expandHome(spec)) : matchVersion(spec, versions, 'the new version');
+  if (!found) throw new UsageError('NOT_FOUND', `no installed Node ${spec} to install into (installed: ${installedList(versions)})`);
+  const dir = found.dir;
+  const current = sameDir(dir, currentGlobalDir(env));
+  const node = current ? process.execPath : nodeIn(prefixOf(dir));
+  if (!existsSync(node)) throw new UsageError('NO_NODE', `no node in ${prefixOf(dir)}: is Node ${spec} installed there?`);
+  return { version: current ? process.versions.node : found.version, manager: found.manager, dir, node, current };
 }
 
 // ---------------------------------------------------------------- packages
@@ -362,8 +403,9 @@ function row(p, widths, s) {
 
 function printList(r) {
   const s = OUT;
-  const from = `Node ${r.from.version ?? '?'}${r.from.manager ? ` (${r.from.manager})` : ''}`;
-  const to = `Node ${r.to.version}`;
+  const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
+  const from = nodeName(r.from);
+  const to = nodeName(r.to);
   const w = Math.max(from.length, to.length);
   console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.dir)}`);
   console.log(`${s.bold('To')}   ${to.padEnd(w)}  ${s.dim(r.to.dir)}\n`);
@@ -416,19 +458,22 @@ async function addLatest(r, env) {
 }
 
 async function list(opts, env = process.env) {
-  const current = currentGlobalDir(env);
-  const from = resolveFrom(opts.from, findVersions(env), current);
-  const packages = compare(readGlobals(from.dir), readGlobals(current));
+  const versions = findVersions(env);
+  const target = resolveTarget(opts.to, versions, env);
+  const from = resolveFrom(opts.from, versions, target.dir);
+  const packages = compare(readGlobals(from.dir), readGlobals(target.dir));
   const r = {
     schemaVersion: SCHEMA_VERSION,
     command: 'list',
     from: { version: from.version, manager: from.manager, dir: from.dir },
-    to: { version: process.versions.node, dir: current },
+    to: { version: target.version, manager: target.manager, dir: target.dir },
     packages,
     summary: summarize(packages),
     warnings: warningsFor(packages),
   };
   if (!opts.offline && !opts['keep-versions']) await addLatest(r, env);
+  // Not enumerable, so it stays out of the JSON: install needs the node to run.
+  Object.defineProperty(r, 'target', { value: target });
   return r;
 }
 
@@ -448,23 +493,38 @@ function npmCliIn(binDir) {
   return path.join(binDir, lib, 'node_modules', 'npm', 'bin', 'npm-cli.js');
 }
 
-// The npm of the Node running now: the one that came with it, or the first on
-// PATH. It is run as `node npm-cli.js`, never through a shell, so nothing in a
-// package name or URL is read by cmd.exe or sh. REGLOBAL_NPM_CLI overrides it.
-function findNpmCli(env) {
+// The npm of the Node installed into. For the Node running now, the one that
+// came with it or the first on PATH; for another version, the one in its own
+// global folder. It is run as `node npm-cli.js`, never through a shell, so
+// nothing in a package name or URL is read by cmd.exe or sh.
+// REGLOBAL_NPM_CLI overrides it.
+function findNpmCli(target, env) {
   if (env.REGLOBAL_NPM_CLI) {
     if (!existsSync(env.REGLOBAL_NPM_CLI)) throw new UsageError('NO_NPM', `REGLOBAL_NPM_CLI is set to ${env.REGLOBAL_NPM_CLI}, which does not exist`);
     return env.REGLOBAL_NPM_CLI;
   }
   const pathDirs = (env.PATH || env.Path || '').split(path.delimiter).filter(Boolean);
-  const cli = firstExisting([path.dirname(process.execPath), ...pathDirs].map(npmCliIn));
-  if (!cli) throw new UsageError('NO_NPM', 'npm was not found next to this Node or on PATH');
+  const candidates = target.current ? [path.dirname(process.execPath), ...pathDirs].map(npmCliIn) : [path.join(target.dir, 'npm', 'bin', 'npm-cli.js')];
+  const cli = firstExisting(candidates);
+  if (!cli)
+    throw new UsageError('NO_NPM', target.current ? 'npm was not found next to this Node or on PATH' : `Node ${target.version} has no npm in ${target.dir}`);
   return cli;
 }
 
-function runNpm(cli, specs, env) {
+// npm installs into the prefix it is given. Under npx, npm passes its own
+// prefix down in npm_config_*, which would point at the Node npx runs in, so
+// every spelling of it is replaced with the target's.
+function npmEnv(target, env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (!/^npm_config_(global_)?prefix$/i.test(k)) out[k] = v;
+  out.npm_config_prefix = prefixOf(target.dir);
+  return out;
+}
+
+function runNpm(target, specs, env) {
+  const cli = findNpmCli(target, env);
   // npm's own output goes to stderr, so stdout stays clean for --json.
-  const r = spawnSync(process.execPath, [cli, 'install', '--global', '--', ...specs], { stdio: ['ignore', 2, 2], env });
+  const r = spawnSync(target.node, [cli, 'install', '--global', '--', ...specs], { stdio: ['ignore', 2, 2], env: npmEnv(target, env) });
   if (r.error) throw r.error;
   return r.status ?? 1;
 }
@@ -675,7 +735,7 @@ async function choose(r, opts, json, env) {
 // 0 installed, 1 failed, 2 nothing to install, 3 cancelled.
 async function install(opts, json, env = process.env) {
   checkInstallOptions(opts, json, env);
-  const r = { ...(await list(opts, env)), command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) };
+  const r = Object.assign(await list(opts, env), { command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) });
   makePlan(r);
   applyFilters(r, opts);
   const report = (code) => {
@@ -692,7 +752,7 @@ async function install(opts, json, env = process.env) {
   if (stop !== null) return stop;
   if (r.dryRun) return report(0);
   r.npmExitCode = runNpm(
-    findNpmCli(env),
+    r.target,
     r.plan.map((p) => p.spec),
     env,
   );
@@ -715,6 +775,7 @@ const INSTALL_ONLY = ['dry-run', 'yes', 'keep-versions', 'skip', 'only', 'intera
 
 const OPTIONS = {
   from: { type: 'string' },
+  to: { type: 'string' },
   list: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
@@ -728,15 +789,26 @@ const OPTIONS = {
   version: { type: 'boolean', short: 'v' },
 };
 
+// `reglobal 24 26` is `--from 24` into Node 26; `reglobal 24` is `--from 24`.
 function parse(args) {
+  let parsed;
   try {
-    return parseArgs({ args, options: OPTIONS, strict: true, allowPositionals: false }).values;
+    parsed = parseArgs({ args, options: OPTIONS, strict: true, allowPositionals: true });
   } catch (e) {
     const opt = /'([^']+)'/.exec(e.message)?.[1] ?? args[0];
     if (e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION') throw new UsageError('UNKNOWN_OPTION', `unknown option ${opt} (see reglobal --help)`);
-    if (e.code === 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL') throw new UsageError('UNKNOWN_COMMAND', `unknown command ${opt} (see reglobal --help)`);
     throw new UsageError('BAD_OPTION', `${e.message.split('\n')[0]} (see reglobal --help)`);
   }
+  const { values, positionals } = parsed;
+  const [old, target, ...extra] = positionals;
+  const notVersion = positionals.find((p) => !looksLikePath(p) && !/^v?\d+(\.\d+){0,2}$/.test(p));
+  if (notVersion) throw new UsageError('UNKNOWN_COMMAND', `unknown command ${notVersion} (see reglobal --help)`);
+  if (extra.length) throw new UsageError('BAD_OPTION', `too many versions: ${positionals.join(' ')}. Give the old one, then the new one.`);
+  if (old !== undefined && values.from) throw new UsageError('BAD_OPTION', `give the old version once: ${old} or --from ${values.from}`);
+  if (target !== undefined && values.to) throw new UsageError('BAD_OPTION', `give the new version once: ${target} or --to ${values.to}`);
+  if (old !== undefined) values.from = old;
+  if (target !== undefined) values.to = target;
+  return values;
 }
 
 function fail(err, json) {
