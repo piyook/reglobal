@@ -12,6 +12,6 @@ description: Reinstall the global npm packages from an older Node version into t
 
 For a new machine, or when the old version is gone: `reglobal export globals.json` on the old one (add `--yes` only if the user agrees to overwrite an existing file), then `reglobal import globals.json --dry-run --json` and steps 3 and 4 on the new one.
 
-If it exits 1 with `NO_OLD_VERSION` or `NOT_FOUND`, the message lists the versions it found; for another manager, pass `--from <path to that version's folder>`. `reglobal --list --json` is the read-only comparison.
+If it exits 1 with `NO_OLD_VERSION` or `NOT_FOUND`, the message lists the versions it found; for another manager, pass `--from <path to that version's folder>`. `reglobal --compare 24 26 --json` is the read-only comparison, and `reglobal --list 24 --json` lists one version's globals.
 
 The full reference (options, JSON shape, exit codes) is `llms.txt`.

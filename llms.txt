@@ -21,7 +21,8 @@ Do not pipe `y` into the prompt: use `--yes`. Without `--yes`, with `--json` or 
 - `--skip <names>`: leave these out. `--only <names>`: install just these. Comma or space separated, or repeat the option. Each name must be one of the packages to install, or reglobal exits 1 (`BAD_NAME`) and installs nothing. They don't go together.
 - `-i`, `--interactive`: a checklist at the terminal (up/down, space, `a` for all or none, enter, `q` to cancel). Not with `--json` or `--yes`.
 - `--offline`: don't look up the latest versions. By default, each registry package to install is looked up at `<registry>/<name>/latest` (the registry is `npm_config_registry`, or registry.npmjs.org). Only the package name is sent, never a token. If the lookup fails, `latest` is `null` and there is a warning: not an error.
-- `--list`: compare the old version's globals with this one's, read-only. Does not take the install options.
+- `--compare`: compare the old version's globals with the new one's, read-only. Takes `<old>`, `<new>`, `--from`, `--to` and `--offline`, not the install options. (Before 0.2.0 this was `--list`.)
+- `--list [<version|path>]` (or `--from`): one version's globals, read-only: the Node in use, or the one given (any installed version, including the one in use). Never asks the registry. With two versions or `--to` it exits 1 and points to `--compare`. Not with `--compare`, `--offline` or the install options.
 
 At the prompt (a terminal, no `--yes`), `y` installs, `e` asks for names to leave out and asks again, and anything else cancels (exit 3).
 - `--json`: JSON on stdout. npm's own output, and without `--json` the `WARNING:` lines, go to stderr.
@@ -35,7 +36,7 @@ Installing is one `npm install --global -- <specs>` run by the current Node with
 For another machine or manager, or when the old version is gone:
 
 - `reglobal export [<file>] [--from <version|path>] [--yes] [--json]` writes the globals of the Node in use (or `--from`) as JSON. With no file, it goes to stdout. An existing file is only overwritten with `--yes`; otherwise it exits 1 with `FILE_EXISTS`. npm, corepack and broken folders are left out, and npm links are kept with `"status": "linked"` and their local path. With `--json` and a file, stdout gets `{ "schemaVersion": 1, "command": "export", "file", "from", "packages": <count> }`.
-- `reglobal import <file> [<new>]` (or `--to`) installs from the file with the normal workflow and options above: preview with `--dry-run --json`, then `--yes`. `--list` compares. `--from` does not go with it. In the JSON, `from` is `{ "version", "manager", "dir": null, "file" }`.
+- `reglobal import <file> [<new>]` (or `--to`) installs from the file with the normal workflow and options above: preview with `--dry-run --json`, then `--yes`. `--compare` compares the file with the Node it would install into; `--list` shows the file alone (not with `<new>` or `--to`). `--from` does not go with it. In the JSON, `from` is `{ "version", "manager", "dir": null, "file" }`.
 
 The file:
 
@@ -63,6 +64,26 @@ Import treats the file as untrusted. Each `name` must be a valid npm package nam
 {
   "schemaVersion": 1,
   "command": "list",
+  "node": { "version": "26.1.0", "manager": "fnm", "dir": "/home/me/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules" },
+  "packages": [
+    { "name": "npm", "version": "11.0.0", "source": "registry", "status": "bundled" },
+    { "name": "typescript", "version": "5.9.3", "source": "registry" },
+    { "name": "from-git", "version": "1.0.0", "source": "git", "resolved": "git+https://github.com/someone/from-git.git#abc" },
+    { "name": "my-tool", "version": "0.1.0", "status": "linked", "link": "/home/me/src/my-tool" }
+  ],
+  "summary": { "packages": 4, "bundled": 1, "linked": 1, "broken": 0 }
+}
+```
+
+- `status` is there only for `bundled` (npm and corepack, which come with Node), `linked` and `broken`. The other fields are as below.
+- Under `import <file> --list`, `node` is `{ "version", "manager", "dir": null, "file" }`, from the file.
+
+`--compare --json`:
+
+```json
+{
+  "schemaVersion": 1,
+  "command": "compare",
   "from": { "version": "24.3.0", "manager": "fnm", "dir": "/home/me/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules" },
   "to": { "version": "26.1.0", "manager": "fnm", "dir":"/home/me/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules" },
   "packages": [
@@ -100,7 +121,7 @@ Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": 
 
 ## Exit codes
 
-- `0`: installed everything in the plan, or a dry run or list was shown.
+- `0`: installed everything in the plan, or a dry run, list or comparison was shown.
 - `1`: error: no old version, a bad name in `--skip`/`--only`, npm failed or left a package out, or `--yes` was needed.
 - `2`: nothing to install (also from `--dry-run`, or when `--skip` left nothing): not an error.
 - `3`: cancelled at the prompt or the checklist, or nothing was left ticked.

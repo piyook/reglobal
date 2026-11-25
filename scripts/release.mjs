@@ -97,7 +97,7 @@ check(reglobal('--help').stdout.includes('Usage: reglobal'), '--help prints usag
 check(reglobal('--bogus').status === 1, 'an unknown option exits 1');
 
 // The real commands, on a made-up old version in a temp folder. Nothing is
-// installed: --dry-run and --list only read, and --offline keeps it off the network.
+// installed: --dry-run and --compare only read, and --offline keeps it off the network.
 {
   const tmp = mkdtempSync(path.join(tmpdir(), 'reglobal-release-'));
   try {
@@ -109,8 +109,8 @@ check(reglobal('--bogus').status === 1, 'an unknown option exits 1');
     const env = { ...nodeEnv, npm_config_prefix: prefix, NO_COLOR: '1' };
     const cli = (...a) => spawnSync(process.execPath, [path.join(ROOT, 'reglobal.js'), ...a], { encoding: 'utf8', env });
     const from = path.join(tmp, 'v22.0.0');
-    const list = cli(from, '--list', '--json', '--offline');
-    check(list.status === 0 && JSON.parse(list.stdout).summary.install === 1, "--list --json finds the old version's package");
+    const list = cli(from, '--compare', '--json', '--offline');
+    check(list.status === 0 && JSON.parse(list.stdout).summary.install === 1, "--compare --json finds the old version's package");
     const dry = cli(from, '--dry-run', '--offline');
     check(dry.status === 0 && dry.stdout.includes('Would run: npm install --global left-pad@latest'), '--dry-run shows the npm command');
     check(cli(from, '--offline').status === 1, 'with no terminal and no --yes, nothing is installed (exit 1)');
