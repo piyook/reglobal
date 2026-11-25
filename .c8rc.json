@@ -1,0 +1,10 @@
+{
+  "include": ["reglobal.js"],
+  "reporter": ["text", "json"],
+  "reportsDirectory": "coverage",
+  "check-coverage": true,
+  "lines": 78,
+  "statements": 78,
+  "branches": 75,
+  "functions": 90
+}

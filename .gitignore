@@ -1,0 +1,29 @@
+# dependencies and build output
+node_modules/
+coverage/
+.nyc_output/
+*.tgz
+pack.json
+
+# logs
+*.log
+npm-debug.log*
+
+# secrets: never commit these
+.env
+.env.*
+.npmrc
+*.pem
+*.key
+
+# local tool and editor state
+.claude/settings.local.json
+.claude/worktrees/
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini

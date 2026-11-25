@@ -1,0 +1,69 @@
+{
+  "name": "reglobal",
+  "version": "0.0.0",
+  "description": "Move your global npm packages to a new Node version: reinstall everything from the old version in one command, at the latest versions. Works with fnm, nvm, nvm-windows, mise, asdf and n. No dependencies.",
+  "keywords": [
+    "npm",
+    "global",
+    "globals",
+    "node-version",
+    "fnm",
+    "nvm",
+    "nvm-windows",
+    "mise",
+    "asdf",
+    "migrate",
+    "reinstall",
+    "cli",
+    "developer-tools",
+    "ai-agents",
+    "llms-txt",
+    "zero-dependencies"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/piyook/reglobal.git"
+  },
+  "homepage": "https://github.com/piyook/reglobal#readme",
+  "bugs": {
+    "url": "https://github.com/piyook/reglobal/issues"
+  },
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/reglobal.test.js",
+    "test:coverage": "c8 node --test test/reglobal.test.js",
+    "fallow": "fallow audit --base origin/main",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "format": "biome format --write",
+    "validate-branch-name": "node scripts/validate-branch-name.mjs",
+    "prepare": "husky",
+    "release": "node scripts/release.mjs",
+    "prepublishOnly": "node --check reglobal.js && node reglobal.js --version"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "bin": {
+    "reglobal": "reglobal.js"
+  },
+  "files": [
+    "reglobal.js",
+    "llms.txt",
+    "skills"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.6.5",
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "c8": "^12.0.0",
+    "fallow": "3.39.0",
+    "husky": "^9.1.7"
+  }
+}

@@ -1,0 +1,5 @@
+# reglobal
+
+> CLI that reinstalls the global npm packages from one Node version into another, for example after `fnm use 26`. Use it when a user has switched or upgraded Node and their global commands are missing, instead of listing and installing them yourself. Install: `npm install -g reglobal`, or `npx reglobal`. Node >= 22, no dependencies.
+
+Work in progress. The full reference for agents (workflow, options, JSON output, exit codes) is written here once the commands exist.

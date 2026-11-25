@@ -1,0 +1,135 @@
+name: standard checks
+
+on:
+    push:
+        branches:
+            - main
+    pull_request:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+env:
+    HUSKY: 0
+
+jobs:
+    lint:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci
+            - run: npx biome ci --reporter=github
+
+    commit_messages:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci
+            - run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
+    fallow:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .nvmrc
+                  cache: npm
+            - run: npm ci
+            # The tests go first, as in the pre-push hook: fallow scores
+            # complexity from the coverage they write, and without it guesses.
+            # They also fail below the coverage minimum in .c8rc.json.
+            - run: npm run test:coverage
+            - run: npx fallow audit --base origin/${{ github.base_ref }} --coverage coverage/coverage-final.json
+
+    branch_name:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .nvmrc
+            - run: npm run validate-branch-name
+
+    unit_tests:
+        needs: [lint]
+        # Run even if lint fails, but not when the run is cancelled.
+        if: ${{ !cancelled() }}
+        # Global folders sit in different places on Windows and POSIX: test on
+        # both, with every Node version package.json "engines" allows.
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest]
+                node: [22, 24, 26]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: ${{ matrix.node }}
+            # No npm ci: the tests use node:test only, and reglobal has no dependencies.
+            - run: node --check reglobal.js
+            - run: npm test
+
+    unit_tests_macos:
+        # macOS once, after a merge to main (and on demand), not on pull requests:
+        # GitHub's macOS runners can queue for 15 minutes or more.
+        # Not a required check in the branch ruleset, since PRs don't run it.
+        if: github.event_name != 'pull_request'
+        runs-on: macos-latest
+        # When GitHub has no macOS runner free, the job is dropped after a long
+        # queue. That says nothing about reglobal, so it must not turn main red:
+        # look at this job's own result, and re-run it if it never started.
+        continue-on-error: true
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version: 26
+            - run: node --check reglobal.js
+            - run: npm test
+
+    package:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-node@v7
+              with:
+                  node-version-file: .nvmrc
+            # The published package must hold exactly these files, and no dependencies.
+            - name: check the files npm would publish
+              run: |
+                  npm pack --dry-run --json --ignore-scripts > pack.json
+                  node -e '
+                    const [p] = require("./pack.json");
+                    const files = p.files.map((f) => f.path).sort();
+                    const want = ["LICENSE", "README.md", "llms.txt", "package.json", "reglobal.js", "skills/reglobal/SKILL.md"];
+                    const pkg = require("./package.json");
+                    const errors = [];
+                    if (JSON.stringify(files) !== JSON.stringify(want)) errors.push(`files: got ${files.join(", ")}; want ${want.join(", ")}`);
+                    if (Object.keys(pkg.dependencies ?? {}).length) errors.push("reglobal must have no runtime dependencies");
+                    if (errors.length) { console.error(errors.join("\n")); process.exit(1); }
+                    console.log(`OK: ${files.length} files, ${p.size} bytes packed`);
+                  '
