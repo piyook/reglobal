@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="465" viewBox="0 0 820 465" role="img" aria-label="A terminal: npx reglobal 22 26 lists the global packages of Node 22 with the versions they move to, asks once, and installs three into Node 26">
+  <rect width="820" height="465" rx="10" fill="#0d1117"/>
+  <rect x="0.5" y="0.5" width="819" height="464" rx="10" fill="none" stroke="#30363d"/>
+  <circle cx="22" cy="18" r="6" fill="#ff5f57"/>
+  <circle cx="42" cy="18" r="6" fill="#febc2e"/>
+  <circle cx="62" cy="18" r="6" fill="#28c840"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13.5" xml:space="preserve" style="white-space: pre">
+    <text x="20" y="52"><tspan fill="#8b949e">$&#160;</tspan><tspan fill="#c9d1d9" font-weight="700">npx&#160;reglobal&#160;22&#160;26</tspan></text>
+    <text x="20" y="73"><tspan fill="#c9d1d9" font-weight="700">From</tspan><tspan fill="#c9d1d9">&#160;Node&#160;22.14.0&#160;(nvm)&#160;&#160;</tspan><tspan fill="#6e7681">/home/dev/.nvm/versions/node/v22.14.0/lib/node_modules</tspan></text>
+    <text x="20" y="94"><tspan fill="#c9d1d9" font-weight="700">To</tspan><tspan fill="#c9d1d9">&#160;&#160;&#160;Node&#160;26.1.0&#160;(nvm)&#160;&#160;&#160;</tspan><tspan fill="#6e7681">/home/dev/.nvm/versions/node/v26.1.0/lib/node_modules</tspan></text>
+    <text x="20" y="115"></text>
+    <text x="20" y="136"><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#3fb950">to&#160;install</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#c9d1d9" font-weight="700">eslint&#160;&#160;&#160;&#160;</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#6e7681">8.57.0</tspan><tspan fill="#c9d1d9">&#160;→&#160;</tspan><tspan fill="#3fb950">9.39.1</tspan><tspan fill="#c9d1d9">&#160;</tspan><tspan fill="#d29922">(major)</tspan></text>
+    <text x="20" y="157"><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#6e7681">skipped&#160;&#160;&#160;</tspan><tspan fill="#c9d1d9">&#160;&#160;npm&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;10.9.2&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</tspan><tspan fill="#6e7681">(comes&#160;with&#160;Node)</tspan></text>
+    <text x="20" y="178"><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#3fb950">to&#160;install</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#c9d1d9" font-weight="700">pnpm&#160;&#160;&#160;&#160;&#160;&#160;</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#6e7681">9.15.0</tspan><tspan fill="#c9d1d9">&#160;→&#160;</tspan><tspan fill="#3fb950">10.20.0</tspan><tspan fill="#c9d1d9">&#160;</tspan><tspan fill="#d29922">(major)</tspan></text>
+    <text x="20" y="199"><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#6e7681">installed&#160;</tspan><tspan fill="#c9d1d9">&#160;&#160;prettier&#160;&#160;&#160;&#160;3.3.3&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</tspan><tspan fill="#6e7681">(here:&#160;3.6.2)</tspan></text>
+    <text x="20" y="220"><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#3fb950">to&#160;install</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#c9d1d9" font-weight="700">typescript</tspan><tspan fill="#c9d1d9">&#160;&#160;</tspan><tspan fill="#6e7681">5.4.5</tspan><tspan fill="#c9d1d9">&#160;→&#160;</tspan><tspan fill="#3fb950">5.9.3</tspan></text>
+    <text x="20" y="241"></text>
+    <text x="20" y="262"><tspan fill="#3fb950">3&#160;to&#160;install</tspan><tspan fill="#c9d1d9">&#160;·&#160;1&#160;already&#160;here&#160;·&#160;1&#160;skipped</tspan></text>
+    <text x="20" y="283"></text>
+    <text x="20" y="304"><tspan fill="#c9d1d9" font-weight="700">Runs:</tspan><tspan fill="#c9d1d9">&#160;</tspan><tspan fill="#6e7681">npm&#160;install&#160;--global</tspan><tspan fill="#c9d1d9">&#160;</tspan><tspan fill="#39c5cf">eslint@latest&#160;pnpm@latest&#160;typescript@latest</tspan></text>
+    <text x="20" y="325"></text>
+    <text x="20" y="346"><tspan fill="#39c5cf">?&#160;</tspan><tspan fill="#c9d1d9" font-weight="700">Install&#160;3&#160;packages&#160;into&#160;Node&#160;26.1.0?</tspan><tspan fill="#c9d1d9">&#160;</tspan><tspan fill="#6e7681">[y/N,&#160;e&#160;to&#160;leave&#160;some&#160;out]</tspan><tspan fill="#c9d1d9">&#160;y</tspan></text>
+    <text x="20" y="367"></text>
+    <text x="20" y="388"><tspan fill="#c9d1d9">added&#160;186&#160;packages&#160;in&#160;9s</tspan></text>
+    <text x="20" y="409"></text>
+    <text x="20" y="430"><tspan fill="#3fb950">✔&#160;Installed&#160;3&#160;packages&#160;into&#160;Node&#160;26.1.0.</tspan></text>
+  </g>
+</svg>

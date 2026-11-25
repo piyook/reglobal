@@ -10,28 +10,44 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { emitKeypressEvents } from 'node:readline';
 import { createInterface } from 'node:readline/promises';
-import { parseArgs } from 'node:util';
+import { parseArgs, stripVTControlCharacters } from 'node:util';
 
 const VERSION = JSON.parse(readFileSync(new URL('./package.json', import.meta.url))).version;
 const SCHEMA_VERSION = 1;
 
-const HELP = `Usage: reglobal [--from <version|path>] [--dry-run | --yes] [--keep-versions] [--json]
-       reglobal --list [--from <version|path>] [--json]
+const HELP = `Usage: reglobal [<old> [<new>]] [--dry-run | --yes | -i] [--skip <names> | --only <names>]
+                [--keep-versions] [--offline] [--json]
+       reglobal --list [<old> [<new>]] [--offline] [--json]
 
-Reinstall the global npm packages from another Node version into this one,
-the Node that runs reglobal. Asks before installing.
+Reinstall the global npm packages from an old Node version into a new one.
+Asks before installing.
+
+  reglobal 24.22.3 26.13.1   from Node 24.22.3 into Node 26.13.1
+  reglobal 24 26             the newest installed 24.x into the newest 26.x
+  reglobal 24                from the newest 24.x into the Node in use
+  reglobal                   from the newest other version into the Node in use
+
+<old> and <new> are versions (24, 24.1, 24.1.0) or a version's install folder.
+<new> defaults to the Node in use; installing into another one runs that
+version's own node and npm.
 
 Options:
-  --from <v|path>  the old Node version: 24, 24.1 or 24.1.0 picks the newest
-                   installed match; a path is that version's install folder
-                   or its global node_modules. Default: the newest installed
-                   version other than this one.
+  --from <v|path>  the same as <old>. Default: the newest installed version
+                   other than <new>.
+  --to <v|path>    the same as <new>. Default: the Node in use.
   --dry-run        show what would be installed, install nothing
-  --yes            install without asking (needed with --json or no terminal)
+  -y, --yes        install without asking (needed with --json or no terminal)
   --keep-versions  install the same versions as before, not the latest
+  --skip <names>   leave these packages out (comma separated, or repeat it)
+  --only <names>   install only these packages
+  -i, --interactive  tick and untick packages in a checklist before installing
+  --offline        don't look up the latest versions on the registry
   --list           show the old version's globals next to this one's (read-only)
   --json           print JSON on stdout
+
+At the question, answer e to type the names of packages to leave out.
   -h, --help       show this help
   -v, --version    print the version
 
@@ -164,24 +180,57 @@ function looksLikePath(s) {
   return /[\\/]/.test(s) || s.startsWith('.') || s.startsWith('~');
 }
 
-// Pick the old version from --from, or the newest one that isn't running now.
-function resolveFrom(from, versions, current) {
-  if (from && looksLikePath(from)) return fromPath(from.replace(/^~(?=$|[\\/])/, os.homedir()));
-  const others = versions.filter((v) => !sameDir(v.dir, current));
-  const installed = versions.length ? versions.map((v) => `${v.version} (${v.manager})`).join(', ') : 'none';
-  if (!from) {
-    if (!others.length) throw new UsageError('NO_OLD_VERSION', `no other Node version found (installed: ${installed}). Use --from <path> for another manager.`);
-    return others[0];
-  }
-  const want = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(from);
-  if (!want) throw new UsageError('BAD_FROM', `--from ${from} is not a version (24, 24.1, 24.1.0) or a path`);
+const installedList = (versions) => (versions.length ? versions.map((v) => `${v.version} (${v.manager})`).join(', ') : 'none');
+const expandHome = (p) => p.replace(/^~(?=$|[\\/])/, os.homedir());
+
+// The newest of `candidates` matching 24, 24.1 or 24.1.0 (a leading v is fine).
+function matchVersion(spec, candidates, label) {
+  const want = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?$/.exec(spec);
+  if (!want) throw new UsageError('BAD_VERSION', `${label} ${spec} is not a version (24, 24.1, 24.1.0) or a path`);
   const parts = want
     .slice(1)
     .filter((p) => p !== undefined)
     .map(Number);
-  const match = others.find((v) => parts.every((n, i) => v.parsed[i] === n));
-  if (!match) throw new UsageError('NOT_FOUND', `no installed Node ${from} other than this one (installed: ${installed})`);
+  return candidates.find((v) => parts.every((n, i) => v.parsed[i] === n));
+}
+
+// Pick the old version: the one asked for, or the newest one other than the target.
+function resolveFrom(from, versions, target) {
+  if (from && looksLikePath(from)) return fromPath(expandHome(from));
+  const others = versions.filter((v) => !sameDir(v.dir, target));
+  if (!from) {
+    if (!others.length)
+      throw new UsageError('NO_OLD_VERSION', `no other Node version found (installed: ${installedList(versions)}). Use --from <path> for another manager.`);
+    return others[0];
+  }
+  const match = matchVersion(from, others, 'the old version');
+  if (!match) throw new UsageError('NOT_FOUND', `no installed Node ${from} other than the one installed into (installed: ${installedList(versions)})`);
   return match;
+}
+
+// Where a Node install keeps node, from its global node_modules folder.
+function prefixOf(dir) {
+  return process.platform === 'win32' ? path.dirname(dir) : path.dirname(path.dirname(dir));
+}
+
+function nodeIn(prefix) {
+  return process.platform === 'win32' ? path.join(prefix, 'node.exe') : path.join(prefix, 'bin', 'node');
+}
+
+// The Node to install into: the one asked for, or the one running reglobal.
+// `node` is that version's own node, which runs its own npm.
+function resolveTarget(spec, versions, env) {
+  if (!spec) {
+    const dir = currentGlobalDir(env);
+    return { version: process.versions.node, manager: null, dir, node: process.execPath, current: true };
+  }
+  const found = looksLikePath(spec) ? fromPath(expandHome(spec)) : matchVersion(spec, versions, 'the new version');
+  if (!found) throw new UsageError('NOT_FOUND', `no installed Node ${spec} to install into (installed: ${installedList(versions)})`);
+  const dir = found.dir;
+  const current = sameDir(dir, currentGlobalDir(env));
+  const node = current ? process.execPath : nodeIn(prefixOf(dir));
+  if (!existsSync(node)) throw new UsageError('NO_NODE', `no node in ${prefixOf(dir)}: is Node ${spec} installed there?`);
+  return { version: current ? process.versions.node : found.version, manager: found.manager, dir, node, current };
 }
 
 // ---------------------------------------------------------------- packages
@@ -265,7 +314,7 @@ function compare(oldPkgs, currentPkgs) {
 }
 
 function summarize(packages) {
-  const summary = { install: 0, present: 0, skipped: 0, linked: 0, manual: 0, broken: 0 };
+  const summary = { install: 0, excluded: 0, present: 0, skipped: 0, linked: 0, manual: 0, broken: 0 };
   for (const p of packages) summary[p.status]++;
   return summary;
 }
@@ -281,41 +330,151 @@ function warningsFor(packages) {
   return warnings;
 }
 
-const LABELS = { install: 'to install', present: 'installed', skipped: 'skipped', linked: 'linked', manual: 'manual', broken: 'broken' };
+const LABELS = {
+  install: 'to install',
+  excluded: 'left out',
+  present: 'installed',
+  skipped: 'skipped',
+  linked: 'linked',
+  manual: 'manual',
+  broken: 'broken',
+};
 
-function describe(p) {
-  const v = p.version ? ` ${p.version}` : '';
-  if (p.status === 'present') return `${p.name}${v} (here: ${p.currentVersion})`;
-  if (p.status === 'skipped') return `${p.name}${v} (comes with Node)`;
-  if (p.status === 'linked') return `${p.name} -> ${p.link} (npm link)`;
-  if (p.source && p.source !== 'registry') return `${p.name}${v} (from ${p.source}: ${p.resolved})`;
-  return `${p.name}${v}`;
+// ---------------------------------------------------------------- styling
+
+// Colour and Unicode symbols only on a terminal. NO_COLOR turns them off and
+// FORCE_COLOR on. Pipes, logs and agents get plain ASCII.
+function makeStyle(stream, env = process.env) {
+  const on = !env.NO_COLOR && (env.FORCE_COLOR ? env.FORCE_COLOR !== '0' : Boolean(stream.isTTY) && env.TERM !== 'dumb');
+  const sgr = (open, close) => (text) => (on ? `\x1b[${open}m${text}\x1b[${close}m` : String(text));
+  return {
+    bold: sgr(1, 22),
+    dim: sgr(2, 22),
+    red: sgr(31, 39),
+    green: sgr(32, 39),
+    yellow: sgr(33, 39),
+    cyan: sgr(36, 39),
+    arrow: on ? '→' : '->',
+    pointer: on ? '❯' : '>',
+    ticked: on ? '◉' : '[x]',
+    unticked: on ? '◯' : '[ ]',
+    ok: on ? '✔ ' : '',
+    ask: on ? '? ' : '',
+    sep: on ? ' · ' : ', ',
+  };
+}
+
+const OUT = makeStyle(process.stdout);
+const ERR = makeStyle(process.stderr);
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+const STATUS_COLOR = { install: 'green', excluded: 'dim', present: 'dim', skipped: 'dim', linked: 'yellow', manual: 'yellow', broken: 'red' };
+
+// "5.4.0 -> 5.9.3 (major)": the old version, and the one @latest gets.
+function versionPart(p, s) {
+  const v = p.version ?? '';
+  if (!p.latest || p.latest === p.version) return v;
+  return `${s.dim(v)} ${s.arrow} ${s.green(p.latest)}${p.majorUpdate ? ` ${s.yellow('(major)')}` : ''}`;
+}
+
+function noteFor(p) {
+  if (p.status === 'present') return `(here: ${p.currentVersion})`;
+  if (p.status === 'skipped') return '(comes with Node)';
+  if (p.status === 'linked') return `(npm link to ${p.link})`;
+  if (p.status === 'broken') return '(no package.json)';
+  if (p.source && p.source !== 'registry') return `(from ${p.source}: ${p.resolved})`;
+  return '';
+}
+
+const nameWidth = (pkgs) => Math.min(40, Math.max(0, ...pkgs.map((p) => p.name.length)));
+
+// Pad styled text by what shows on screen, not counting the colour codes.
+const visible = (text) => stripVTControlCharacters(text).length;
+const padStyled = (text, width) => text + ' '.repeat(Math.max(0, width - visible(text)));
+
+function row(p, widths, s) {
+  const label = s[STATUS_COLOR[p.status]](LABELS[p.status].padEnd(10));
+  const name = p.status === 'install' ? s.bold(p.name.padEnd(widths.name)) : p.name.padEnd(widths.name);
+  const note = noteFor(p);
+  const version = versionPart(p, s);
+  return `  ${label}  ${name}  ${note ? `${padStyled(version, widths.version)}  ${s.dim(note)}` : version}`.trimEnd();
 }
 
 function printList(r) {
-  const from = `Node ${r.from.version ?? '?'}${r.from.manager ? ` (${r.from.manager})` : ''}`;
-  console.log(`From ${from}: ${r.from.dir}`);
-  console.log(`To   Node ${r.to.version}: ${r.to.dir}\n`);
-  if (!r.packages.length) console.log('  no global packages');
-  for (const p of r.packages) console.log(`  ${LABELS[p.status].padEnd(11)} ${describe(p)}`);
-  const s = r.summary;
-  console.log(`\n${s.install} to install, ${s.present} already here, ${s.skipped + s.linked + s.manual + s.broken} skipped.`);
-  for (const w of r.warnings) console.error(`WARNING: ${w}`);
+  const s = OUT;
+  const nodeName = (v) => `Node ${v.version ?? '?'}${v.manager ? ` (${v.manager})` : ''}`;
+  const from = nodeName(r.from);
+  const to = nodeName(r.to);
+  const w = Math.max(from.length, to.length);
+  console.log(`${s.bold('From')} ${from.padEnd(w)}  ${s.dim(r.from.dir)}`);
+  console.log(`${s.bold('To')}   ${to.padEnd(w)}  ${s.dim(r.to.dir)}\n`);
+  if (!r.packages.length) console.log(s.dim('  no global packages'));
+  const widths = { name: nameWidth(r.packages), version: Math.max(0, ...r.packages.map((p) => visible(versionPart(p, s)))) };
+  for (const p of r.packages) console.log(row(p, widths, s));
+  const c = r.summary;
+  const parts = [s.green(`${c.install} to install`)];
+  if (c.excluded) parts.push(`${c.excluded} left out`);
+  parts.push(`${c.present} already here`, `${c.skipped + c.linked + c.manual + c.broken} skipped`);
+  console.log(`\n${parts.join(s.sep)}`);
+  for (const w of r.warnings) console.error(`${ERR.yellow('WARNING:')} ${w}`);
 }
 
-function list(opts, env = process.env) {
-  const current = currentGlobalDir(env);
-  const from = resolveFrom(opts.from, findVersions(env), current);
-  const packages = compare(readGlobals(from.dir), readGlobals(current));
-  return {
+// ---------------------------------------------------------------- latest versions
+
+// A move to a new major version (or, below 1.0, a new minor) can break things.
+function isMajorUpdate(from, to) {
+  const a = /^(\d+)\.(\d+)/.exec(from ?? '');
+  const b = /^(\d+)\.(\d+)/.exec(to ?? '');
+  if (!a || !b) return false;
+  if (a[1] !== b[1]) return Number(b[1]) > Number(a[1]);
+  return a[1] === '0' && Number(b[2]) > Number(a[2]);
+}
+
+async function latestVersion(registry, name) {
+  try {
+    const url = `${registry.replace(/\/+$/, '')}/${name.replace('/', '%2F')}/latest`;
+    const res = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return null;
+    const { version } = await res.json();
+    return typeof version === 'string' ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+// Look up what @latest is for each registry package to install. Only public
+// package names are sent, never a token. npm_config_registry picks the registry.
+async function addLatest(r, env) {
+  const targets = r.packages.filter((p) => p.status === 'install' && p.source === 'registry');
+  if (!targets.length) return;
+  const registry = env.npm_config_registry || env.NPM_CONFIG_REGISTRY || 'https://registry.npmjs.org/';
+  const found = await Promise.all(targets.map((p) => latestVersion(registry, p.name)));
+  targets.forEach((p, i) => {
+    p.latest = found[i];
+    p.majorUpdate = isMajorUpdate(p.version, found[i]);
+  });
+  if (found.every((v) => v === null)) r.warnings.push(`could not get the latest versions from ${registry}: pass --offline to skip the lookup`);
+}
+
+async function list(opts, env = process.env) {
+  const versions = findVersions(env);
+  const target = resolveTarget(opts.to, versions, env);
+  const from = resolveFrom(opts.from, versions, target.dir);
+  const packages = compare(readGlobals(from.dir), readGlobals(target.dir));
+  const r = {
     schemaVersion: SCHEMA_VERSION,
     command: 'list',
     from: { version: from.version, manager: from.manager, dir: from.dir },
-    to: { version: process.versions.node, dir: current },
+    to: { version: target.version, manager: target.manager, dir: target.dir },
     packages,
     summary: summarize(packages),
     warnings: warningsFor(packages),
   };
+  if (!opts.offline && !opts['keep-versions']) await addLatest(r, env);
+  // Not enumerable, so it stays out of the JSON: install needs the node to run.
+  Object.defineProperty(r, 'target', { value: target });
+  return r;
 }
 
 // ---------------------------------------------------------------- install
@@ -334,64 +493,266 @@ function npmCliIn(binDir) {
   return path.join(binDir, lib, 'node_modules', 'npm', 'bin', 'npm-cli.js');
 }
 
-// The npm of the Node running now: the one that came with it, or the first on
-// PATH. It is run as `node npm-cli.js`, never through a shell, so nothing in a
-// package name or URL is read by cmd.exe or sh. REGLOBAL_NPM_CLI overrides it.
-function findNpmCli(env) {
+// The npm of the Node installed into. For the Node running now, the one that
+// came with it or the first on PATH; for another version, the one in its own
+// global folder. It is run as `node npm-cli.js`, never through a shell, so
+// nothing in a package name or URL is read by cmd.exe or sh.
+// REGLOBAL_NPM_CLI overrides it.
+function findNpmCli(target, env) {
   if (env.REGLOBAL_NPM_CLI) {
     if (!existsSync(env.REGLOBAL_NPM_CLI)) throw new UsageError('NO_NPM', `REGLOBAL_NPM_CLI is set to ${env.REGLOBAL_NPM_CLI}, which does not exist`);
     return env.REGLOBAL_NPM_CLI;
   }
   const pathDirs = (env.PATH || env.Path || '').split(path.delimiter).filter(Boolean);
-  const cli = firstExisting([path.dirname(process.execPath), ...pathDirs].map(npmCliIn));
-  if (!cli) throw new UsageError('NO_NPM', 'npm was not found next to this Node or on PATH');
+  const candidates = target.current ? [path.dirname(process.execPath), ...pathDirs].map(npmCliIn) : [path.join(target.dir, 'npm', 'bin', 'npm-cli.js')];
+  const cli = firstExisting(candidates);
+  if (!cli)
+    throw new UsageError('NO_NPM', target.current ? 'npm was not found next to this Node or on PATH' : `Node ${target.version} has no npm in ${target.dir}`);
   return cli;
 }
 
-function runNpm(cli, specs, env) {
+// npm installs into the prefix it is given. Under npx, npm passes its own
+// prefix down in npm_config_*, which would point at the Node npx runs in, so
+// every spelling of it is replaced with the target's.
+function npmEnv(target, env) {
+  const out = {};
+  for (const [k, v] of Object.entries(env)) if (!/^npm_config_(global_)?prefix$/i.test(k)) out[k] = v;
+  out.npm_config_prefix = prefixOf(target.dir);
+  return out;
+}
+
+function runNpm(target, specs, env) {
+  const cli = findNpmCli(target, env);
   // npm's own output goes to stderr, so stdout stays clean for --json.
-  const r = spawnSync(process.execPath, [cli, 'install', '--global', '--', ...specs], { stdio: ['ignore', 2, 2], env });
+  const r = spawnSync(target.node, [cli, 'install', '--global', '--', ...specs], { stdio: ['ignore', 2, 2], env: npmEnv(target, env) });
   if (r.error) throw r.error;
   return r.status ?? 1;
 }
 
-async function confirm(question) {
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    return /^y(es)?$/i.test((await rl.question(question)).trim());
-  } finally {
-    rl.close();
+// ---------------------------------------------------------------- choosing
+
+function makePlan(r) {
+  r.plan = r.packages
+    .filter((p) => p.status === 'install')
+    .map((p) => {
+      const entry = { name: p.name, version: p.version, source: p.source, spec: specFor(p, r.keepVersions) };
+      if ('latest' in p) Object.assign(entry, { latest: p.latest, majorUpdate: p.majorUpdate });
+      return entry;
+    });
+  r.summary = summarize(r.packages);
+}
+
+function splitNames(values) {
+  return values
+    .flatMap((v) => v.split(/[\s,]+/))
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+// Every name must be one of the packages to install: a typo in --skip would
+// otherwise install the very package it was meant to leave out.
+function checkNames(r, names) {
+  const plan = new Set(r.plan.map((p) => p.name));
+  for (const name of names) {
+    if (plan.has(name)) continue;
+    const pkg = r.packages.find((p) => p.name === name);
+    const why = pkg ? `its status is ${pkg.status}` : `Node ${r.from.version ?? '(old)'} has no global package by that name`;
+    throw new UsageError('BAD_NAME', `${name} is not one of the packages to install: ${why}`);
   }
 }
 
-function printPlan(r) {
-  printList(r);
-  if (!r.plan.length) console.log('\nNothing to install.');
-  else console.log(`\n${r.dryRun ? 'Would run' : 'Runs'}: npm install --global ${r.plan.map((p) => p.spec).join(' ')}`);
+function leaveOut(r, names) {
+  checkNames(r, names);
+  const drop = new Set(names);
+  for (const p of r.packages) if (drop.has(p.name)) p.status = 'excluded';
+  makePlan(r);
+}
+
+function applyFilters(r, opts) {
+  const skip = splitNames(opts.skip ?? []);
+  const only = splitNames(opts.only ?? []);
+  if (skip.length && only.length) throw new UsageError('BAD_OPTION', '--skip and --only do not go together: use one of them');
+  if (skip.length) leaveOut(r, skip);
+  if (only.length) {
+    checkNames(r, only);
+    leaveOut(
+      r,
+      r.plan.map((p) => p.name).filter((n) => !only.includes(n)),
+    );
+  }
+}
+
+// One readline for every question, so typed-ahead answers aren't lost.
+function prompter() {
+  const rl = createInterface({ input: process.stdin, terminal: Boolean(process.stdin.isTTY) });
+  const lines = rl[Symbol.asyncIterator]();
+  return {
+    async ask(question) {
+      process.stderr.write(question);
+      const { value, done } = await lines.next();
+      return done ? null : value.trim();
+    },
+    close: () => rl.close(),
+  };
+}
+
+// y installs, e asks which names to leave out and asks again, anything else cancels.
+async function confirm(r) {
+  const p = prompter();
+  try {
+    for (;;) {
+      const s = ERR;
+      const question = `Install ${plural(r.plan.length, 'package')} into Node ${r.to.version}?`;
+      const answer = (await p.ask(`\n${s.cyan(s.ask)}${s.bold(question)} ${s.dim('[y/N, e to leave some out]')} `)) ?? '';
+      if (/^y(es)?$/i.test(answer)) return true;
+      if (!/^e(dit)?$/i.test(answer)) return false;
+      const names = splitNames([(await p.ask(`${s.cyan(s.ask)}${s.bold('Names to leave out')} ${s.dim('(space or comma separated)')} `)) ?? '']);
+      try {
+        leaveOut(r, names);
+      } catch (err) {
+        console.error(`${s.red('reglobal:')} ${err.message}`);
+        continue;
+      }
+      if (!r.plan.length) return false;
+      printRun(r);
+    }
+  } finally {
+    p.close();
+  }
+}
+
+// The arrow-key checklist for -i. It draws on stderr and redraws in place.
+// Returns the names left ticked, or null when cancelled.
+function checklist(items) {
+  const { stdin, stderr: out } = process;
+  const s = ERR;
+  const on = items.map(() => true);
+  const width = nameWidth(items);
+  const keyHelp =
+    s.arrow === '->' ? 'up/down move, space tick, a all or none, enter go on, q cancel' : '↑/↓ move · space tick · a all/none · enter go on · q cancel';
+  let cursor = 0;
+  let drawn = 0;
+  const line = (p, i) => {
+    const here = i === cursor;
+    const box = on[i] ? s.green(s.ticked) : s.dim(s.unticked);
+    const name = p.name.padEnd(width);
+    return `${here ? s.cyan(s.pointer) : ' '} ${box} ${here ? s.bold(s.cyan(name)) : on[i] ? name : s.dim(name)}  ${versionPart(p, s)}`;
+  };
+  const draw = () => {
+    if (drawn) out.write(`\x1b[${drawn}A\x1b[0J`);
+    const ticked = on.filter(Boolean).length;
+    const lines = [
+      `\n${s.cyan(s.ask)}${s.bold('Choose what to install')}  ${s.dim(keyHelp)}`,
+      ...items.map(line),
+      s.dim(`  ${ticked} of ${items.length} ticked`),
+    ];
+    const text = lines.join('\n');
+    out.write(`${text}\n`);
+    drawn = text.split('\n').length;
+  };
+  const keys = {
+    up: () => {
+      cursor = (cursor + items.length - 1) % items.length;
+    },
+    down: () => {
+      cursor = (cursor + 1) % items.length;
+    },
+    space: () => {
+      on[cursor] = !on[cursor];
+    },
+    a: () => on.fill(!on.every(Boolean)),
+  };
+  Object.assign(keys, { k: keys.up, j: keys.down });
+  return new Promise((resolve) => {
+    const done = (value) => {
+      stdin.off('keypress', onKey);
+      stdin.off('end', onEnd);
+      if (out.isTTY) out.write('\x1b[?25h');
+      if (stdin.isTTY) stdin.setRawMode(false);
+      stdin.pause();
+      resolve(value);
+    };
+    const onEnd = () => done(null);
+    const onKey = (_str, key = {}) => {
+      if ((key.ctrl && key.name === 'c') || key.name === 'escape' || key.name === 'q') return done(null);
+      if (key.name === 'return' || key.name === 'enter') return done(items.filter((_, i) => on[i]).map((p) => p.name));
+      keys[key.name]?.();
+      draw();
+    };
+    emitKeypressEvents(stdin);
+    if (stdin.isTTY) stdin.setRawMode(true);
+    if (out.isTTY) out.write('\x1b[?25l'); // hide the cursor while the list is up
+    stdin.on('keypress', onKey);
+    stdin.on('end', onEnd);
+    stdin.resume();
+    draw();
+  });
+}
+
+// ---------------------------------------------------------------- install flow
+
+function printRun(r) {
+  const s = OUT;
+  console.log(`\n${s.bold(r.dryRun ? 'Would run:' : 'Runs:')} ${s.dim('npm install --global')} ${s.cyan(r.plan.map((p) => p.spec).join(' '))}`);
+}
+
+// A terminal to ask in. REGLOBAL_ASSUME_TTY=1 lets the tests answer through a pipe.
+function canAsk(env) {
+  return Boolean(process.stdin.isTTY) || env.REGLOBAL_ASSUME_TTY === '1';
+}
+
+function checkInstallOptions(opts, json, env) {
+  if (!opts.interactive) return;
+  if (json) throw new UsageError('BAD_OPTION', '--interactive does not go with --json: use --skip or --only');
+  if (opts.yes) throw new UsageError('BAD_OPTION', '--interactive does not go with --yes: the checklist is the question');
+  if (!canAsk(env)) throw new UsageError('NEEDS_TERMINAL', '--interactive needs a terminal: use --skip or --only');
+}
+
+function cancelled(message) {
+  console.log(OUT.yellow(message));
+  return 3;
+}
+
+// Ask, if asking is needed: the checklist for -i, otherwise y/N/e unless --yes.
+// Returns an exit code to stop with, or null to go on.
+async function choose(r, opts, json, env) {
+  if (opts.interactive) {
+    const picked = await checklist(r.plan);
+    if (!picked) return cancelled('Cancelled: nothing installed.');
+    leaveOut(
+      r,
+      r.plan.map((p) => p.name).filter((n) => !picked.includes(n)),
+    );
+    if (!r.plan.length) return cancelled('Nothing ticked: nothing installed.');
+    printRun(r);
+    return null;
+  }
+  if (r.dryRun || opts.yes) return null;
+  if (json || !canAsk(env)) throw new UsageError('NEEDS_YES', 'nothing installed: pass --yes to install without asking, or --dry-run to preview');
+  return (await confirm(r)) ? null : cancelled('Cancelled: nothing installed.');
 }
 
 // 0 installed, 1 failed, 2 nothing to install, 3 cancelled.
 async function install(opts, json, env = process.env) {
-  const r = { ...list(opts, env), command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) };
-  r.plan = r.packages
-    .filter((p) => p.status === 'install')
-    .map((p) => ({ name: p.name, version: p.version, source: p.source, spec: specFor(p, r.keepVersions) }));
+  checkInstallOptions(opts, json, env);
+  const r = Object.assign(await list(opts, env), { command: 'install', dryRun: Boolean(opts['dry-run']), keepVersions: Boolean(opts['keep-versions']) });
+  makePlan(r);
+  applyFilters(r, opts);
   const report = (code) => {
     if (json) console.log(JSON.stringify(r, null, 2));
     return code;
   };
-  if (!json) printPlan(r);
-  if (!r.plan.length) return report(2);
-  if (r.dryRun) return report(0);
-  if (!opts.yes) {
-    if (json || !process.stdin.isTTY) throw new UsageError('NEEDS_YES', 'nothing installed: pass --yes to install without asking, or --dry-run to preview');
-    if (!(await confirm(`Install ${r.plan.length} package(s) into Node ${r.to.version}? [y/N] `))) {
-      console.log('Cancelled: nothing installed.');
-      return 3;
-    }
+  if (!json) printList(r);
+  if (!r.plan.length) {
+    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Nothing to install.`)}`);
+    return report(2);
   }
+  if (!json && !opts.interactive) printRun(r);
+  const stop = await choose(r, opts, json, env);
+  if (stop !== null) return stop;
+  if (r.dryRun) return report(0);
   r.npmExitCode = runNpm(
-    findNpmCli(env),
+    r.target,
     r.plan.map((p) => p.spec),
     env,
   );
@@ -399,45 +760,61 @@ async function install(opts, json, env = process.env) {
   r.installed = r.plan.filter((p) => after.has(p.name)).map((p) => p.name);
   r.failed = r.plan.filter((p) => !after.has(p.name)).map((p) => p.name);
   if (r.npmExitCode === 0 && !r.failed.length) {
-    if (!json) console.log(`Installed ${r.installed.length} package(s) into Node ${r.to.version}.`);
+    if (!json) console.log(`\n${OUT.green(`${OUT.ok}Installed ${plural(r.installed.length, 'package')} into Node ${r.to.version}.`)}`);
     return report(0);
   }
   const message = `npm exited with ${r.npmExitCode}; not installed: ${r.failed.join(', ') || 'none'}`;
   r.error = { code: 'INSTALL_FAILED', message };
-  if (!json) console.error(`reglobal: ${message}`);
+  if (!json) console.error(`${ERR.red('reglobal:')} ${message}`);
   return report(1);
 }
 
 // ---------------------------------------------------------------- cli
 
-const INSTALL_ONLY = ['dry-run', 'yes', 'keep-versions'];
+const INSTALL_ONLY = ['dry-run', 'yes', 'keep-versions', 'skip', 'only', 'interactive'];
 
 const OPTIONS = {
   from: { type: 'string' },
+  to: { type: 'string' },
   list: { type: 'boolean' },
   'dry-run': { type: 'boolean' },
   yes: { type: 'boolean', short: 'y' },
   'keep-versions': { type: 'boolean' },
+  skip: { type: 'string', multiple: true },
+  only: { type: 'string', multiple: true },
+  interactive: { type: 'boolean', short: 'i' },
+  offline: { type: 'boolean' },
   json: { type: 'boolean' },
   help: { type: 'boolean', short: 'h' },
   version: { type: 'boolean', short: 'v' },
 };
 
+// `reglobal 24 26` is `--from 24` into Node 26; `reglobal 24` is `--from 24`.
 function parse(args) {
+  let parsed;
   try {
-    return parseArgs({ args, options: OPTIONS, strict: true, allowPositionals: false }).values;
+    parsed = parseArgs({ args, options: OPTIONS, strict: true, allowPositionals: true });
   } catch (e) {
     const opt = /'([^']+)'/.exec(e.message)?.[1] ?? args[0];
     if (e.code === 'ERR_PARSE_ARGS_UNKNOWN_OPTION') throw new UsageError('UNKNOWN_OPTION', `unknown option ${opt} (see reglobal --help)`);
-    if (e.code === 'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL') throw new UsageError('UNKNOWN_COMMAND', `unknown command ${opt} (see reglobal --help)`);
     throw new UsageError('BAD_OPTION', `${e.message.split('\n')[0]} (see reglobal --help)`);
   }
+  const { values, positionals } = parsed;
+  const [old, target, ...extra] = positionals;
+  const notVersion = positionals.find((p) => !looksLikePath(p) && !/^v?\d+(\.\d+){0,2}$/.test(p));
+  if (notVersion) throw new UsageError('UNKNOWN_COMMAND', `unknown command ${notVersion} (see reglobal --help)`);
+  if (extra.length) throw new UsageError('BAD_OPTION', `too many versions: ${positionals.join(' ')}. Give the old one, then the new one.`);
+  if (old !== undefined && values.from) throw new UsageError('BAD_OPTION', `give the old version once: ${old} or --from ${values.from}`);
+  if (target !== undefined && values.to) throw new UsageError('BAD_OPTION', `give the new version once: ${target} or --to ${values.to}`);
+  if (old !== undefined) values.from = old;
+  if (target !== undefined) values.to = target;
+  return values;
 }
 
 function fail(err, json) {
   const code = err instanceof UsageError ? err.code : 'ERROR';
   if (json) console.log(JSON.stringify({ schemaVersion: SCHEMA_VERSION, error: { code, message: err.message } }, null, 2));
-  else console.error(`reglobal: ${err.message}`);
+  else console.error(`${ERR.red('reglobal:')} ${err.message}`);
   return 1;
 }
 
@@ -457,7 +834,7 @@ export async function main(argv) {
     if (!opts.list) return await install(opts, json);
     const extra = INSTALL_ONLY.find((o) => opts[o]);
     if (extra) throw new UsageError('BAD_OPTION', `--${extra} does not go with --list, which installs nothing`);
-    const result = list(opts);
+    const result = await list(opts);
     if (json) console.log(JSON.stringify(result, null, 2));
     else printList(result);
     return 0;

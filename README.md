@@ -1,6 +1,6 @@
 # reglobal
 
-> Work in progress: not on npm yet. The badges below start working after the repo is public and the first release is out.
+> Work in progress: not on npm yet. The badges below start working after the first release.
 
 [![GitHub Release](https://img.shields.io/github/v/release/piyook/reglobal)](https://github.com/piyook/reglobal/releases)
 [![checks workflow](https://github.com/piyook/reglobal/actions/workflows/checks.yaml/badge.svg)](https://github.com/piyook/reglobal/actions/workflows/checks.yaml)
@@ -9,61 +9,87 @@
 [![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Moved to a new Node version and lost your global packages? reglobal reinstalls them in one command.
+Moved to a new Node version and lost your global packages? reglobal copies them across in one command.
 
 ```sh
-fnm install 26 && fnm use 26
-npx reglobal --from 24
+npx reglobal 24.22.3 26.13.1
 ```
 
-It finds the global packages you had in the old version, by reading that version's folder directly, and reinstalls them in the new one at their latest versions (or at the same versions, with `--keep-versions`).
+![reglobal moving the global packages of Node 22 into Node 26: it lists each one with the version it moves to, asks once, and installs them](https://raw.githubusercontent.com/piyook/reglobal/main/docs/screenshot.svg)
 
-- Works with fnm, nvm, nvm-windows, mise, asdf and n, or any other manager with `--from <path>`.
-- `export` and `import` move the list between machines.
-- Made for agents too: `--json` output, `--dry-run`, `--yes`, and exit codes an agent can act on.
+It reads the old version's global packages straight from its folder, shows you what will move and to which version, asks once, then installs them all into the new version with a single `npm install --global`.
+
+- Works with fnm, nvm, nvm-windows, mise, asdf and n, or any other manager by pointing it at a folder.
+- Shows the version each package moves to, and flags new major versions.
+- Leave packages out with a checklist (`-i`), a flag (`--skip`) or at the question.
+- The old Node and npm never run, so it works even when they're broken.
+- Made for agents too: `--json` output, `--dry-run`, `--yes`, and clear exit codes.
+- Coming: `export` and `import`, to move the list between machines.
 
 No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 
-## Install
+## Usage
 
 ```sh
-npm install -g reglobal
+npx reglobal <old> [<new>] [options]
 ```
-
-Or run it without installing: `npx reglobal`.
-
-## See what would move
 
 ```sh
-reglobal --list            # the newest other installed version vs this one
-reglobal --list --from 24  # or name the old version (24, 24.1, 24.1.0, or a folder)
+npx reglobal 24.22.3 26.13.1   # from Node 24.22.3 into Node 26.13.1
+npx reglobal 24 26             # the same, picking the newest installed 24.x and 26.x
+npx reglobal 24                # from 24 into the Node you're using now
+npx reglobal                   # from the newest other version into the Node you're using now
 ```
+
+A version is `24`, `24.1` or `24.1.0` (the newest installed match), or the path to a version's folder. Without `<new>`, reglobal installs into the Node in use. With it, reglobal runs that version's own node and npm, so you don't need to switch to it first.
+
+reglobal always shows the list and asks before installing anything:
 
 ```text
-From Node 24.3.0 (fnm): ~/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules
-To   Node 26.1.0: ~/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules
-
-  to install  typescript 5.4.0
-  installed   cowsay 1.6.0 (here: 1.7.0)
-  skipped     npm 10.0.0 (comes with Node)
-
-1 to install, 1 already here, 1 skipped.
+? Install 3 packages into Node 26.1.0? [y/N, e to leave some out]
 ```
 
-It only reads folders: the old Node and npm never run, so it works even when they're broken. Add `--json` for output a script or agent can read (see [llms.txt](llms.txt)).
+`y` installs, `e` lets you type the names of packages to leave out, and anything else cancels.
 
-## Reinstall them
+### Why npx
 
-```sh
-reglobal                   # shows the list, asks, then runs one npm install --global
-reglobal --dry-run         # show what it would run, install nothing
-reglobal --yes             # don't ask (scripts and agents)
-reglobal --keep-versions   # the same versions as before, not the latest
-```
+Use `npx reglobal` rather than installing it. A global install of reglobal belongs to one Node version, so after a switch it's missing from the new one, like your other globals. `npm install -g reglobal` still works if you'd like it installed: run `reglobal` in place of `npx reglobal`.
 
-npm and corepack are left alone, since they come with Node. Packages from git come back from git. `npm link` folders and packages installed from a local file are listed, not reinstalled.
+## Options
 
-Exit codes: `0` done, `1` error, `2` nothing to install, `3` cancelled.
+| Option | What it does |
+| --- | --- |
+| `--list` | Show what the old version has and the new one hasn't. Installs nothing. |
+| `--dry-run` | Show the list and the npm command it would run. Installs nothing. |
+| `-i`, `--interactive` | Tick and untick packages in a checklist (arrow keys, space, enter) before installing. |
+| `--skip <names>` | Leave these packages out: `--skip eslint,pnpm`. |
+| `--only <names>` | Install just these packages. |
+| `--keep-versions` | Install the same versions as before, not the latest. |
+| `--offline` | Don't look up the latest versions on the registry. |
+| `-y`, `--yes` | Don't ask (for scripts and agents). |
+| `--json` | Print JSON on stdout (see [llms.txt](llms.txt)). |
+| `--from <v>`, `--to <v>` | The same as `<old>` and `<new>`. |
+
+## What gets moved
+
+- **Registry packages** are installed at `@latest`, or at the old version with `--keep-versions`. The list shows each move as `8.57.0 → 9.39.1`, and `(major)` marks a new major version, which can break things.
+- **Packages from git** come back from git, at the latest commit, or at the same commit with `--keep-versions`.
+- **npm and corepack** are left alone, since they come with Node.
+- **`npm link` folders and packages from a local file** are listed with a warning, not reinstalled.
+- **Packages already in the new version** are left as they are.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Done (or a list or dry run was shown). |
+| `1` | Error: no such version, npm failed, or `--yes` was needed. |
+| `2` | Nothing to install. |
+| `3` | Cancelled. |
+
+## For agents
+
+`llms.txt` has the full reference, and `skills/reglobal/SKILL.md` is a ready-made skill. In short: preview with `npx reglobal 24 26 --dry-run --json`, show the user the plan, then run the same command with `--yes` (and `--skip` for anything they left out). Without `--yes`, and with no terminal, reglobal installs nothing and exits 1.
 
 ## License
 
