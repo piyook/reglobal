@@ -70,7 +70,47 @@ function listJson(m, ...args) {
   return JSON.parse(r.stdout);
 }
 
+function listJsonInstall(m, args) {
+  const r = reglobal([...args, '--json'], m.env);
+  return { code: r.code, json: JSON.parse(r.stdout), stderr: r.stderr };
+}
+
 const byName = (result) => Object.fromEntries(result.packages.map((p) => [p.name, p]));
+
+// A stand-in for npm-cli.js: it logs its arguments, prints to stdout (which
+// reglobal must send to stderr), and "installs" each spec by making its folder
+// in the npm prefix. FAKE_NPM_SKIP leaves some out; FAKE_NPM_EXIT sets the exit code.
+const FAKE_NPM = `
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+const args = process.argv.slice(2);
+appendFileSync(process.env.FAKE_NPM_LOG, JSON.stringify(args) + '\\n');
+console.log('fake npm output');
+const modules = path.join(process.env.NPM_CONFIG_PREFIX, process.platform === 'win32' ? '' : 'lib', 'node_modules');
+const skip = (process.env.FAKE_NPM_SKIP || '').split(',');
+for (const spec of args.slice(args.indexOf('--') + 1)) {
+  const name = spec.includes('://') ? spec.match(/\\/([^/#]+?)(?:\\.git)?(?:#.*)?$/)[1] : spec.replace(/(.)@[^@]*$/, '$1');
+  if (skip.includes(name)) continue;
+  const dir = path.join(modules, ...name.split('/'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name, version: '9.9.9' }));
+}
+process.exit(Number(process.env.FAKE_NPM_EXIT || 0));
+`;
+
+function withFakeNpm(m) {
+  const cli = path.join(m.root, 'fake-npm.mjs');
+  writeFileSync(cli, FAKE_NPM);
+  m.env.REGLOBAL_NPM_CLI = cli;
+  m.env.FAKE_NPM_LOG = path.join(m.root, 'npm-calls.log');
+  return () => {
+    try {
+      return readFileSync(m.env.FAKE_NPM_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+    } catch {
+      return [];
+    }
+  };
+}
 
 describe('cli basics', () => {
   test('--version prints the package version', () => {
@@ -83,10 +123,6 @@ describe('cli basics', () => {
     const r = reglobal(['--help']);
     assert.equal(r.code, 0);
     assert.match(r.stdout, /^Usage: reglobal/);
-  });
-
-  test('no arguments prints usage', () => {
-    assert.match(reglobal([]).stdout, /^Usage: reglobal/);
   });
 
   test('an unknown option exits 1', () => {
@@ -107,10 +143,10 @@ describe('cli basics', () => {
     assert.match(r.stderr, /--from/);
   });
 
-  test('installing is not built yet', () => {
-    const r = reglobal(['--from', '24']);
+  test('--list does not take the install options', () => {
+    const r = reglobal(['--list', '--yes']);
     assert.equal(r.code, 1);
-    assert.match(r.stderr, /not built yet/);
+    assert.match(r.stderr, /--yes does not go with --list/);
   });
 
   test('errors are JSON with --json', () => {
@@ -267,7 +303,7 @@ describe('--list', () => {
     assert.equal(p.cowsay.currentVersion, '1.7.0');
     assert.equal(p.npm.status, 'skipped');
     assert.equal(p.corepack.status, 'skipped');
-    assert.deepEqual(r.summary, { install: 2, present: 1, skipped: 2, linked: 0, broken: 0 });
+    assert.deepEqual(r.summary, { install: 2, present: 1, skipped: 2, linked: 0, manual: 0, broken: 0 });
     assert.deepEqual(r.warnings, []);
   });
 
@@ -340,12 +376,14 @@ describe('--list', () => {
     assert.equal(p['from-git'].source, 'git');
     assert.equal(p['from-git'].resolved, 'git+ssh://git@github.com/someone/from-git.git#abc123');
     assert.equal(p['from-file'].source, 'file');
+    assert.equal(p['from-file'].status, 'manual');
     assert.equal(p['from-url'].source, 'url');
     assert.equal(p['from-registry'].source, 'registry');
     assert.equal(p['from-registry'].resolved, undefined);
     const text = reglobal(['--list'], m.env);
     assert.match(text.stdout, /from-git 1\.0\.0 \(from git: git\+ssh/);
-    assert.match(text.stderr, /from-git was installed from git/);
+    assert.match(text.stderr, /from-git is reinstalled from git/);
+    assert.match(text.stderr, /from-file was installed from a file .+ Install it again by hand/);
   });
 
   test("npm's hidden lockfile gives the source and links", () => {
@@ -366,5 +404,151 @@ describe('--list', () => {
     assert.equal(p['from-git'].source, 'git');
     assert.equal(p.linked.status, 'linked');
     assert.equal(p.linked.link, '../../src/linked');
+  });
+});
+
+describe('install', () => {
+  // An old version with two registry packages, npm, and one already here.
+  function setup() {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'typescript', '5.4.0');
+    pkg(old, '@scope/tool', '2.0.0');
+    pkg(old, 'npm', '10.0.0');
+    pkg(old, 'cowsay', '1.6.0');
+    pkg(m.current, 'cowsay', '1.7.0');
+    const calls = withFakeNpm(m);
+    return { m, old, calls };
+  }
+
+  test('--yes installs the missing packages at @latest in one npm call', () => {
+    const { m, calls } = setup();
+    const r = reglobal(['--yes'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(calls(), [['install', '--global', '--', '@scope/tool@latest', 'typescript@latest']]);
+    assert.match(r.stdout, /Runs: npm install --global @scope\/tool@latest typescript@latest/);
+    assert.match(r.stdout, /Installed 2 package\(s\) into Node /);
+    assert.doesNotMatch(r.stdout, /fake npm output/);
+    assert.match(r.stderr, /fake npm output/);
+  });
+
+  test('--keep-versions installs the same versions', () => {
+    const { m, calls } = setup();
+    assert.equal(reglobal(['--yes', '--keep-versions'], m.env).code, 0);
+    assert.deepEqual(calls()[0].slice(3), ['@scope/tool@2.0.0', 'typescript@5.4.0']);
+  });
+
+  test('--dry-run shows the plan and runs nothing', () => {
+    const { m, calls } = setup();
+    const r = reglobal(['--dry-run', '--from', '24'], m.env);
+    assert.equal(r.code, 0);
+    assert.match(r.stdout, /Would run: npm install --global @scope\/tool@latest typescript@latest/);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('--dry-run --json gives the plan', () => {
+    const { m, calls } = setup();
+    const out = listJsonInstall(m, ['--dry-run', '--keep-versions']);
+    assert.equal(out.code, 0);
+    assert.equal(out.json.command, 'install');
+    assert.equal(out.json.dryRun, true);
+    assert.equal(out.json.keepVersions, true);
+    assert.deepEqual(out.json.plan, [
+      { name: '@scope/tool', version: '2.0.0', source: 'registry', spec: '@scope/tool@2.0.0' },
+      { name: 'typescript', version: '5.4.0', source: 'registry', spec: 'typescript@5.4.0' },
+    ]);
+    assert.equal(out.json.installed, undefined);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('--yes --json reports what was installed', () => {
+    const { m } = setup();
+    const out = listJsonInstall(m, ['--yes']);
+    assert.equal(out.code, 0, out.stderr);
+    assert.equal(out.json.npmExitCode, 0);
+    assert.deepEqual(out.json.installed, ['@scope/tool', 'typescript']);
+    assert.deepEqual(out.json.failed, []);
+  });
+
+  test('without --yes and with no terminal, installs nothing and exits 1', () => {
+    const { m, calls } = setup();
+    const r = reglobal([], m.env);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /to install {2}typescript/);
+    assert.match(r.stderr, /nothing installed: pass --yes/);
+    const json = listJsonInstall(m, []);
+    assert.equal(json.code, 1);
+    assert.equal(json.json.error.code, 'NEEDS_YES');
+    assert.deepEqual(calls(), []);
+  });
+
+  test('nothing to install exits 2', () => {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'npm', '10.0.0');
+    const calls = withFakeNpm(m);
+    const r = reglobal(['--yes'], m.env);
+    assert.equal(r.code, 2);
+    assert.match(r.stdout, /Nothing to install\./);
+    assert.equal(listJsonInstall(m, ['--yes']).code, 2);
+    assert.deepEqual(calls(), []);
+  });
+
+  test('an npm failure exits 1 and names what is missing', () => {
+    const { m } = setup();
+    m.env.FAKE_NPM_EXIT = '1';
+    m.env.FAKE_NPM_SKIP = 'typescript,@scope/tool';
+    const r = reglobal(['--yes'], m.env);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /npm exited with 1; not installed: @scope\/tool, typescript/);
+    const out = listJsonInstall(m, ['--yes']);
+    assert.equal(out.code, 1);
+    assert.equal(out.json.error.code, 'INSTALL_FAILED');
+    assert.deepEqual(out.json.failed, ['@scope/tool', 'typescript']);
+  });
+
+  test('a package npm did not install is a failure even when npm exits 0', () => {
+    const { m } = setup();
+    m.env.FAKE_NPM_SKIP = 'typescript';
+    const out = listJsonInstall(m, ['--yes']);
+    assert.equal(out.code, 1);
+    assert.deepEqual(out.json.installed, ['@scope/tool']);
+    assert.deepEqual(out.json.failed, ['typescript']);
+    assert.match(out.json.error.message, /npm exited with 0; not installed: typescript/);
+  });
+
+  test('git installs come back from git, at the latest commit unless --keep-versions', () => {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    const url = 'git+ssh://git@github.com/someone/from-git.git';
+    pkg(old, 'from-git', '1.0.0', { _resolved: `${url}#abc123` });
+    pkg(old, 'from-file', '1.0.0', { _resolved: 'file:../from-file-1.0.0.tgz' });
+    const calls = withFakeNpm(m);
+    const r = reglobal(['--yes'], m.env);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /manual {6}from-file 1\.0\.0 \(from file: file:\.\.\/from-file-1\.0\.0\.tgz\)/);
+    assert.deepEqual(calls()[0].slice(3), [url]);
+    rmSync(path.join(m.current, 'from-git'), { recursive: true });
+    assert.equal(reglobal(['--yes', '--keep-versions'], m.env).code, 0);
+    assert.deepEqual(calls()[1].slice(3), [`${url}#abc123`]);
+  });
+
+  test('a tarball URL is installed from that URL', () => {
+    const m = machine();
+    const old = fnmVersion(m, '24.3.0');
+    pkg(old, 'from-url', '1.0.0', { _resolved: 'https://example.com/pkgs/from-url.tgz' });
+    const calls = withFakeNpm(m);
+    reglobal(['--dry-run'], m.env);
+    const out = listJsonInstall(m, ['--dry-run']);
+    assert.equal(out.json.plan[0].spec, 'https://example.com/pkgs/from-url.tgz');
+    assert.deepEqual(calls(), []);
+  });
+
+  test('a REGLOBAL_NPM_CLI that does not exist exits 1', () => {
+    const { m } = setup();
+    m.env.REGLOBAL_NPM_CLI = path.join(m.root, 'no-such-npm.js');
+    const out = listJsonInstall(m, ['--yes']);
+    assert.equal(out.code, 1);
+    assert.equal(out.json.error.code, 'NO_NPM');
   });
 });

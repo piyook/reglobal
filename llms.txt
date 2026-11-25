@@ -2,23 +2,33 @@
 
 > CLI that reinstalls the global npm packages from one Node version into another, for example after `fnm use 26`. Use it when a user has switched or upgraded Node and their global commands are missing, instead of listing and installing them yourself. Install: `npm install -g reglobal`, or `npx reglobal`. Node >= 22, no dependencies.
 
-Work in progress: `--list` works; installing (`--dry-run`, `--yes`, `--keep-versions`), `export` and `import` are not built yet.
+Work in progress: `export` and `import` are not built yet.
 
 ## Workflow
 
 1. Switch to the new Node version first (`fnm use 26`, `nvm use 26`, ...). reglobal installs into the Node that runs it.
-2. `reglobal --list --json` (or `--from 24` to pick the old version). Read-only.
-3. Show the user the packages with `"status": "install"` and any `warnings`.
+2. Preview: `reglobal --dry-run --json` (add `--from 24` to name the old version). Nothing is installed and nothing is asked.
+3. Show the user the `plan` and every entry in `warnings`, and get their agreement.
+4. Install: the same command with `--yes` in place of `--dry-run`. Check `installed` and `failed` in the JSON.
+
+Do not pipe `y` into the prompt: use `--yes`. Without `--yes`, with `--json` or with no terminal, reglobal installs nothing and exits 1 (`NEEDS_YES`).
 
 ## Options
 
 - `--from <version|path>`: the old Node version. `24`, `24.1` or `24.1.0` picks the newest installed match (a leading `v` is fine). A path is that version's install folder or its global `node_modules`. Default: the newest installed version other than the one running.
-- `--list`: compare the old version's globals with this one's. Changes nothing.
-- `--json`: JSON on stdout. Warnings are in the JSON; without `--json` they go to stderr as `WARNING:` lines.
+- `--dry-run`: show the plan, install nothing.
+- `--yes` (`-y`): install without asking.
+- `--keep-versions`: install the versions the old Node had (`typescript@5.4.0`), and git packages at the same commit. Default: `@latest`, and the latest commit.
+- `--list`: compare the old version's globals with this one's, read-only. Does not take `--dry-run`, `--yes` or `--keep-versions`.
+- `--json`: JSON on stdout. npm's own output, and without `--json` the `WARNING:` lines, go to stderr.
 
 Versions are found by reading folders, never by running the old Node or npm: fnm (`FNM_DIR`, or its default folder), nvm (`NVM_DIR`, `~/.nvm`), nvm-windows (`NVM_HOME`), mise (`MISE_DATA_DIR`), asdf (`ASDF_DATA_DIR`, `~/.asdf`) and n (`N_PREFIX`, `/usr/local`). For anything else, pass `--from <path>`. The current Node's globals are in the npm prefix (`npm_config_prefix`), or next to `node`.
 
-## JSON (`--list --json`)
+Installing is one `npm install --global -- <specs>` run by the current Node with its own npm (`npm-cli.js` next to `node`, or the first on PATH), never through a shell. `REGLOBAL_NPM_CLI=<path to npm-cli.js>` picks another.
+
+## JSON
+
+`--list --json`:
 
 ```json
 {
@@ -32,18 +42,35 @@ Versions are found by reading folders, never by running the old Node or npm: fnm
     { "name": "npm", "version": "10.0.0", "source": "registry", "status": "skipped", "currentVersion": "11.0.0" },
     { "name": "my-tool", "version": "0.1.0", "status": "linked", "link": "/home/me/src/my-tool" }
   ],
-  "summary": { "install": 1, "present": 1, "skipped": 1, "linked": 1, "broken": 0 },
+  "summary": { "install": 1, "present": 1, "skipped": 1, "linked": 1, "manual": 0, "broken": 0 },
   "warnings": ["my-tool is an npm link to /home/me/src/my-tool: not reinstalled. Run npm link again in that folder."]
 }
 ```
 
-- `status`: `install` (missing here), `present` (already here; `currentVersion` is this one's), `skipped` (npm and corepack come with Node), `linked` (an `npm link`: never installed), `broken` (no readable package.json).
+- `status`: `install` (missing here), `present` (already here; `currentVersion` is this one's), `skipped` (npm and corepack come with Node), `linked` (an `npm link`: never installed), `manual` (installed from a local file: install it again by hand), `broken` (no readable package.json).
 - `source`: `registry`, `git`, `file` or `url`; anything but `registry` also has `resolved`. Taken from npm's `node_modules/.package-lock.json` or the package's `_resolved`, and `registry` when neither says.
 - `from.manager` and `from.version` are `null` when `--from` was a path they can't be read from.
 
-Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_FROM`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`, `NOT_BUILT`.
+Installing (`--dry-run --json`, `--yes --json`) prints the same fields, with `"command": "install"` and:
+
+```json
+{
+  "dryRun": false,
+  "keepVersions": false,
+  "plan": [{ "name": "typescript", "version": "5.4.0", "source": "registry", "spec": "typescript@latest" }],
+  "npmExitCode": 0,
+  "installed": ["typescript"],
+  "failed": []
+}
+```
+
+`npmExitCode`, `installed` and `failed` are only there after npm ran. A package counts as installed when its folder is in this Node's globals afterwards. On failure the same object also has `error`.
+
+Errors, with `--json`, are on stdout: `{ "schemaVersion": 1, "error": { "code": "NOT_FOUND", "message": "..." } }`. Codes: `NO_OLD_VERSION`, `NOT_FOUND`, `BAD_FROM`, `NEEDS_YES`, `NO_NPM`, `INSTALL_FAILED`, `UNKNOWN_OPTION`, `UNKNOWN_COMMAND`, `BAD_OPTION`.
 
 ## Exit codes
 
-- `0`: done (`--list` always exits 0 once it has read both folders).
-- `1`: error, including no old version found.
+- `0`: installed everything in the plan, or a dry run or list was shown.
+- `1`: error: no old version, npm failed or left a package out, or `--yes` was needed.
+- `2`: nothing to install (also from `--dry-run`): not an error.
+- `3`: cancelled at the prompt.
