@@ -547,12 +547,24 @@ function exportCmd(opts, json, env = process.env) {
 }
 
 // 'wx' creates the file only if nothing is there, checked and created in one
-// step, and fails on a symlink even when it points nowhere. --yes overwrites.
+// step. On POSIX it also fails on a symlink that points nowhere, but Windows
+// follows the link and creates its target, so a symlink is refused first.
+// --yes overwrites.
 function writeExport(file, text, overwrite) {
+  const exists = () => new UsageError('FILE_EXISTS', `${file} already exists: pass --yes to overwrite it, or pick another name`);
+  if (!overwrite) {
+    let isLink = false;
+    try {
+      isLink = lstatSync(file).isSymbolicLink();
+    } catch {
+      // nothing there: 'wx' below creates it
+    }
+    if (isLink) throw exists();
+  }
   try {
     writeFileSync(file, text, { flag: overwrite ? 'w' : 'wx' });
   } catch (err) {
-    if (err.code === 'EEXIST') throw new UsageError('FILE_EXISTS', `${file} already exists: pass --yes to overwrite it, or pick another name`);
+    if (err.code === 'EEXIST') throw exists();
     if (err.code === 'ENOENT') throw new UsageError('NOT_FOUND', `the folder ${path.dirname(file)} does not exist`);
     if (err.code === 'EISDIR') throw new UsageError('BAD_OPTION', `${file} is a folder: give a file name`);
     throw err;
