@@ -10,10 +10,16 @@ if [ -n "$branches" ]; then
 	npm run validate-branch-name -- $branches
 fi
 
-# Compare against the real main, not a stale local copy.
-git fetch --quiet origin main
+# Compare against the real main, not a stale local copy. On the very first
+# push origin has no main yet: there is nothing for fallow to compare with.
+has_main=1
+git fetch --quiet origin main 2>/dev/null || has_main=0
 npx biome ci
 # The tests go before fallow, which scores complexity from the coverage they
 # write. They fail below the minimum in .c8rc.json.
 npm run test:coverage
-npx fallow audit --base origin/main
+if [ "$has_main" = 1 ]; then
+	npx fallow audit --base origin/main
+else
+	echo "origin has no main branch yet: fallow skipped"
+fi
