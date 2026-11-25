@@ -19,55 +19,52 @@ npx reglobal --from 24
 It finds the global packages you had in the old version, by reading that version's folder directly, and reinstalls them in the new one at their latest versions (or at the same versions, with `--keep-versions`).
 
 - Works with fnm, nvm, nvm-windows, mise, asdf and n, or any other manager with `--from <path>`.
-- `export` and `import` move the list between machines.
+- Shows the version each package will move to, and lets you leave some out.
 - Made for agents too: `--json` output, `--dry-run`, `--yes`, and exit codes an agent can act on.
+- Coming: `export` and `import`, to move the list between machines.
 
 No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 
-## Install
+## Run it with npx (no install needed)
 
 ```sh
-npm install -g reglobal
+npx reglobal
 ```
 
-Or run it without installing: `npx reglobal`.
+This is the way to use it. A global install of reglobal belongs to one Node version, so after a switch it is missing from the new one, like your other globals. `npx reglobal` runs in the Node you have just switched to, which is the one it installs into, and needs nothing installed first.
+
+If you'd still like it installed, `npm install -g reglobal` works too: then run `reglobal` in place of `npx reglobal` below.
 
 ## See what would move
 
 ```sh
-reglobal --list            # the newest other installed version vs this one
-reglobal --list --from 24  # or name the old version (24, 24.1, 24.1.0, or a folder)
+npx reglobal --list            # the newest other installed version vs this one
+npx reglobal --list --from 24  # or name the old version (24, 24.1, 24.1.0, or a folder)
 ```
 
 ```text
 From Node 24.3.0 (fnm): ~/.local/share/fnm/node-versions/v24.3.0/installation/lib/node_modules
 To   Node 26.1.0: ~/.local/share/fnm/node-versions/v26.1.0/installation/lib/node_modules
 
-  to install  typescript 5.4.0
+  to install  typescript 5.4.0 -> 5.9.3
+  to install  eslint 8.57.0 -> 9.39.1 (major)
   installed   cowsay 1.6.0 (here: 1.7.0)
   skipped     npm 10.0.0 (comes with Node)
 
-1 to install, 1 already here, 1 skipped.
+2 to install, 1 already here, 1 skipped.
 ```
 
-It only reads folders: the old Node and npm never run, so it works even when they're broken. Add `--json` for output a script or agent can read (see [llms.txt](llms.txt)).
+It only reads folders: the old Node and npm never run, so it works even when they're broken. `-> 5.9.3` is what `@latest` will install, and `(major)` flags a new major version, which can break things. Add `--json` for output a script or agent can read (see [llms.txt](llms.txt)).
 
 ## Reinstall them
 
 ```sh
-reglobal                   # shows the list, asks, then runs one npm install --global
-reglobal --dry-run         # show what it would run, install nothing
-reglobal --yes             # don't ask (scripts and agents)
-reglobal --keep-versions   # the same versions as before, not the latest
-reglobal -i                # tick and untick packages in a checklist first
-reglobal --skip eslint     # leave some out (or --only typescript,pnpm)
-```
-
-The list shows the version each package will move to, and flags a new major version:
-
-```text
-  to install  typescript 5.4.0 -> 5.9.3
-  to install  eslint 8.57.0 -> 9.39.1 (major)
+npx reglobal                   # shows the list, asks, then runs one npm install --global
+npx reglobal --dry-run         # show what it would run, install nothing
+npx reglobal --yes             # don't ask (scripts and agents)
+npx reglobal --keep-versions   # the same versions as before, not the latest
+npx reglobal -i                # tick and untick packages in a checklist first
+npx reglobal --skip eslint     # leave some out (or --only typescript,pnpm)
 ```
 
 At the question, answer `e` to type the names of the ones to leave out. `--offline` skips the version lookup.
