@@ -21,8 +21,10 @@ const LIB = WIN ? '' : 'lib';
 
 const baseEnv = {};
 for (const [k, v] of Object.entries(process.env)) {
-  // Leave out anything that would point reglobal at the real machine.
-  if (/^(npm_config_|ELECTRON_RUN_AS_NODE$|FNM_|NVM_|MISE_|ASDF_|N_PREFIX$|XDG_DATA_HOME$|APPDATA$|LOCALAPPDATA$|HOME$|USERPROFILE$)/i.test(k)) continue;
+  // Leave out anything that would point reglobal at the real machine, and
+  // FORCE_COLOR: node --test sets it in a terminal, which colours the output.
+  if (/^(npm_config_|ELECTRON_RUN_AS_NODE$|FORCE_COLOR$|FNM_|NVM_|MISE_|ASDF_|N_PREFIX$|XDG_DATA_HOME$|APPDATA$|LOCALAPPDATA$|HOME$|USERPROFILE$)/i.test(k))
+    continue;
   baseEnv[k] = v;
 }
 baseEnv.NO_COLOR = '1';
@@ -47,7 +49,7 @@ http.createServer((req, res) => {
   appendFileSync(process.env.FAKE_REGISTRY_LOG, name + '\\n');
   if (!versions[name]) { res.writeHead(404).end('{}'); return; }
   res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ name, version: versions[name] }));
-}).listen(0, '127.0.0.1', function () { console.log(this.address().port); });
+}).listen(0, '127.0.0.1', function () { console.log(String(this.address().port)); });
 `;
 let registry;
 let registryLog;

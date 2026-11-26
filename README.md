@@ -1,7 +1,5 @@
 # reglobal
 
-> Not on npm yet: the npm badge starts working with the first npm release.
-
 [![GitHub Release](https://img.shields.io/github/v/release/piyook/reglobal)](https://github.com/piyook/reglobal/releases)
 [![checks workflow](https://github.com/piyook/reglobal/actions/workflows/checks.yaml/badge.svg)](https://github.com/piyook/reglobal/actions/workflows/checks.yaml)
 [![npm version](https://img.shields.io/npm/v/reglobal)](https://www.npmjs.com/package/reglobal)
