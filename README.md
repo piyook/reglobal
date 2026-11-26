@@ -2,7 +2,7 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/piyook/reglobal)](https://github.com/piyook/reglobal/releases)
 [![checks workflow](https://github.com/piyook/reglobal/actions/workflows/checks.yaml/badge.svg)](https://github.com/piyook/reglobal/actions/workflows/checks.yaml)
-[![npm version](https://img.shields.io/npm/v/reglobal)](https://www.npmjs.com/package/reglobal)
+[![npm version](https://img.shields.io/npm/v/%40piyook%2Freglobal)](https://www.npmjs.com/package/@piyook/reglobal)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen)](https://nodejs.org)
 [![dependencies: 0](https://img.shields.io/badge/dependencies-0-brightgreen)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -10,7 +10,7 @@
 Moved to a new Node version and lost your global packages? reglobal copies them across in one command.
 
 ```sh
-npx reglobal 24.22.3 26.13.1
+npx @piyook/reglobal 24.22.3 26.13.1
 ```
 
 ![reglobal moving the global packages of Node 22 into Node 26: it lists each one with the version it moves to, asks once, and installs them](https://raw.githubusercontent.com/piyook/reglobal/main/docs/screenshot.svg)
@@ -29,14 +29,14 @@ No dependencies. Needs Node 22 or newer. Works on Windows, macOS and Linux.
 ## Usage
 
 ```sh
-npx reglobal <old> [<new>] [options]
+npx @piyook/reglobal <old> [<new>] [options]
 ```
 
 ```sh
-npx reglobal 24.22.3 26.13.1   # from Node 24.22.3 into Node 26.13.1
-npx reglobal 24 26             # the same, picking the newest installed 24.x and 26.x
-npx reglobal 24                # from 24 into the Node you're using now
-npx reglobal                   # from the newest other version into the Node you're using now
+npx @piyook/reglobal 24.22.3 26.13.1   # from Node 24.22.3 into Node 26.13.1
+npx @piyook/reglobal 24 26             # the same, picking the newest installed 24.x and 26.x
+npx @piyook/reglobal 24                # from 24 into the Node you're using now
+npx @piyook/reglobal                   # from the newest other version into the Node you're using now
 ```
 
 A version is `24`, `24.1` or `24.1.0` (the newest installed match), or the path to a version's folder. Without `<new>`, reglobal installs into the Node in use. With it, reglobal runs that version's own node and npm, so you don't need to switch to it first.
@@ -54,9 +54,9 @@ reglobal always shows the list and asks before installing anything:
 Moving to a new machine, or a different version manager? Save the list on the old one and install from it on the new one:
 
 ```sh
-npx reglobal export globals.json           # the Node you're using (or --from 24)
-npx reglobal import globals.json           # on the new machine: into the Node in use
-npx reglobal import globals.json 26        # or into Node 26
+npx @piyook/reglobal export globals.json           # the Node you're using (or --from 24)
+npx @piyook/reglobal import globals.json           # on the new machine: into the Node in use
+npx @piyook/reglobal import globals.json 26        # or into Node 26
 ```
 
 `export` writes a small JSON file of names, versions and where each package came from. With no file name, it prints to the screen. It won't overwrite a file that's already there unless you add `--yes`. `npm link` folders are kept in the file, with their local path, so import can warn about them.
@@ -67,7 +67,7 @@ Only import files you trust. Installing a package runs its install scripts, so l
 
 ### Why npx
 
-Use `npx reglobal` rather than installing it. A global install of reglobal belongs to one Node version, so after a switch it's missing from the new one, like your other globals. `npm install -g reglobal` still works if you'd like it installed: run `reglobal` in place of `npx reglobal`.
+Use `npx @piyook/reglobal` rather than installing it. A global install of reglobal belongs to one Node version, so after a switch it's missing from the new one, like your other globals. `npm install -g @piyook/reglobal` still works if you'd like it installed: run `reglobal` in place of `npx @piyook/reglobal`.
 
 ## Options
 
@@ -104,7 +104,7 @@ Use `npx reglobal` rather than installing it. A global install of reglobal belon
 
 ## For agents
 
-`llms.txt` has the full reference, and `skills/reglobal/SKILL.md` is a ready-made skill. In short: preview with `npx reglobal 24 26 --dry-run --json`, show the user the plan, then run the same command with `--yes` (and `--skip` for anything they left out). Without `--yes`, and with no terminal, reglobal installs nothing and exits 1.
+`llms.txt` has the full reference, and `skills/reglobal/SKILL.md` is a ready-made skill. In short: preview with `npx @piyook/reglobal 24 26 --dry-run --json`, show the user the plan, then run the same command with `--yes` (and `--skip` for anything they left out). Without `--yes`, and with no terminal, reglobal installs nothing and exits 1.
 
 ## License
 
