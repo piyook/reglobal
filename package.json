@@ -41,18 +41,6 @@
     "release": "node scripts/release.mjs",
     "prepublishOnly": "node --check reglobal.js && node reglobal.js --version"
   },
-  "commitlint": {
-    "extends": [
-      "@commitlint/config-conventional"
-    ],
-    "rules": {
-      "body-max-line-length": [
-        1,
-        "always",
-        100
-      ]
-    }
-  },
   "bin": {
     "reglobal": "reglobal.js"
   },
