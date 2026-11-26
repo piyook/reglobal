@@ -1,5 +1,5 @@
 {
-  "name": "reglobal",
+  "name": "@piyook/reglobal",
   "version": "0.2.0",
   "description": "Move your global npm packages to a new Node version: reinstall everything from the old version in one command, at the latest versions. Works with fnm, nvm, nvm-windows, mise, asdf and n. No dependencies.",
   "keywords": [
@@ -60,5 +60,8 @@
     "c8": "^12.0.0",
     "fallow": "3.46.0",
     "husky": "^9.1.7"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
